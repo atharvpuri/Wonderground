@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sheepdog Sunset</title>
+<style>
+:root{--bg:#3f7a3a}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#3f7a3a}}
+:root[data-theme="dark"]{--bg:#3f7a3a}
+html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;overscroll-behavior:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+canvas{position:fixed;inset:0;display:block;touch-action:none}
+#probe{position:fixed;top:0;left:0;visibility:hidden;padding-top:env(safe-area-inset-top,0px)}
+</style>
+</head>
+<body>
+<div id="probe"></div>
+<canvas id="c"></canvas>
+<script>
+(() => {
+'use strict';
+const STATES = { START: 0, PLAYING: 1, BETWEEN: 2, GAMEOVER: 3 };
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), probe = document.getElementById('probe');
+const TAU = Math.PI * 2, D = 100, Z0 = 80, FR = 22, PEN_X = 12, PEN_Z = 22;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+};
+let best = parseInt(store.get('sheepdog.best') || '0', 10) || 0;
+
+/* ---------- canvas + perspective camera ---------- */
+let W, H, dpr, WW, sN, f, camH, hy, yN, yF, safeTop = 0;
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 3);
+  W = innerWidth; H = innerHeight;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  safeTop = probe.offsetHeight || 0;
+  WW = 70 * Math.max(1, (W / H) / 0.7); sN = W / WW; f = sN * Z0;
+  const sF = sN * Z0 / (D + Z0); yN = H * 0.92; yF = H * 0.3;
+  camH = (yN - yF) / (sN - sF); hy = yF - camH * sF;
+}
+const proj = (x, z) => { const s = f / (z + Z0); return { x: W / 2 + x * s, y: hy + camH * s, s }; };
+const unproj = (sx, sy) => { const s = (sy - hy) / camH; return { x: (sx - W / 2) / s, z: f / s - Z0 }; };
+addEventListener('resize', resize);
+addEventListener('orientationchange', () => setTimeout(resize, 120));
+
+/* ---------- audio ---------- */
+let AC = null;
+function audio() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { AC = null; } }
+  if (AC && AC.state === 'suspended') AC.resume();
+  return AC;
+}
+function tone(type, f0, f1, dur, vol, delay) {
+  const a = audio(); if (!a) return;
+  try {
+    const o = a.createOscillator(), g = a.createGain(), t = a.currentTime + (delay || 0);
+    o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(a.destination); o.start(t); o.stop(t + dur + 0.03);
+  } catch (e) {}
+}
+const sfx = {
+  bark() { tone('square', 340, 160, 0.1, 0.09); tone('square', 320, 150, 0.1, 0.09, 0.13); },
+  baa() { tone('sawtooth', 300, 210, 0.22, 0.05); tone('sawtooth', 310, 220, 0.2, 0.04, 0.05); },
+  howl() { tone('sine', 380, 760, 0.35, 0.08); tone('sine', 760, 300, 0.45, 0.08, 0.35); },
+  steal() { tone('sawtooth', 160, 40, 0.35, 0.14); },
+  done() { [523, 659, 784, 1046].forEach((n, i) => tone('triangle', n, n, 0.18, 0.12, i * 0.08)); },
+  over() { tone('sawtooth', 380, 35, 0.9, 0.14); tone('square', 190, 25, 1, 0.09, 0.1); },
+  start() { tone('triangle', 330, 660, 0.14, 0.1); }
+};
+
+/* ---------- state ---------- */
+let state = STATES.START, G, raf = 0, last = 0, overAt = 0, reason = '';
+const trees = Array.from({ length: 12 }, (_, i) => ({ side: i % 2 ? 1 : -1, z: 8 + Math.floor(i / 2) * 17 + Math.random() * 6, k: 0.8 + Math.random() * 0.5 }));
+const keys = { l: 0, r: 0, u: 0, d: 0 };
+const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+const rgb = c => 'rgb(' + c.join(',') + ')';
+
+function spawnSheep(i) {
+  let x, z, t = 0;
+  do { x = (Math.random() - .5) * (WW - 14); z = 8 + Math.random() * 46; t++; } while (t < 10 && Math.hypot(x - G.dog.x, z - G.dog.z) < 20);
+  return { x, z, vx: 0, vz: 0, wa: Math.random() * TAU, id: i, penned: false, flee: 0, face: 1 };
+}
+function newLevel() {
+  const g = G; g.n = Math.min(20, 6 + 2 * g.level); g.T = Math.max(40, 30 + g.n * 3 - g.level * 2); g.time = g.T;
+  g.sheep = Array.from({ length: g.n }, (_, i) => spawnSheep(i)); g.wolves = []; g.wolfT = 8; g.penned = 0; g.lost = 0;
+}
+function resetGame() {
+  G = { level: 0, score: 0, lives: 3, combo: 0, comboT: 0, dog: { x: 0, z: 6, vx: 0, vz: 0, face: 1 }, tx: 0, tz: 6, bark: 0, barkFx: 0, popups: [], parts: [], shake: 0, between: 0, tapped: false, t: 0, flocks: 0 };
+  newLevel();
+}
+resetGame();
+
+/* ---------- loop (single pointer) ---------- */
+function stopLoop() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+function startLoop() { stopLoop(); last = performance.now(); raf = requestAnimationFrame(frame); }
+function frame(now) {
+  raf = requestAnimationFrame(frame);
+  const dt = Math.min(0.05, Math.max(0, (now - last) / 1000)); last = now;
+  update(dt); draw(now);
+}
+document.addEventListener('visibilitychange', () => { document.hidden ? stopLoop() : startLoop(); });
+function startGame() { stopLoop(); resetGame(); state = STATES.PLAYING; sfx.start(); startLoop(); }
+
+/* ---------- logic ---------- */
+function popup(t, col, x, z) { const p = proj(x, z); G.popups.push({ t, col, x: p.x, y: p.y - 40, life: 1 }); }
+function puff(x, z, n, col) { const p = proj(x, z); for (let i = 0; i < n; i++) { const a = Math.random() * TAU, s = 40 + Math.random() * 120; G.parts.push({ x: p.x, y: p.y - 12, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 60, life: 0.5 + Math.random() * 0.5, col, sz: 3 + Math.random() * 3 }); } }
+function finish(why) {
+  state = STATES.GAMEOVER; reason = why; overAt = performance.now(); sfx.over(); G.shake = 1;
+  const s = Math.floor(G.score); if (s > best) { best = s; store.set('sheepdog.best', String(best)); }
+}
+function doBark() {
+  const g = G; if (state !== STATES.PLAYING || g.bark > 0) return;
+  g.bark = 1.2; g.barkFx = 0.5; sfx.bark();
+  for (const s of g.sheep) { if (s.penned) continue; const dx = s.x - g.dog.x, dz = s.z - g.dog.z, d = Math.hypot(dx, dz) || 1; if (d < 28) { const k = 22 * (1 - d / 28); s.vx += dx / d * k; s.vz += dz / d * k; } }
+  for (const w of g.wolves) if (Math.hypot(w.x - g.dog.x, w.z - g.dog.z) < 34) { w.fleeT = 4; }
+}
+function updateSheep(dt) {
+  const g = G, sh = g.sheep, dog = g.dog;
+  for (const s of sh) {
+    if (s.penned) {
+      s.wa += (Math.random() - .5) * 3 * dt; s.vx += Math.cos(s.wa) * 4 * dt; s.vz += Math.sin(s.wa) * 4 * dt; s.vx *= Math.exp(-3 * dt); s.vz *= Math.exp(-3 * dt);
+      s.x = clamp(s.x + s.vx * dt, -PEN_X + 3, PEN_X - 3); s.z = clamp(s.z + s.vz * dt, D - PEN_Z + 6, D - 3); continue;
+    }
+    let ax = 0, az = 0, fl = 0;
+    const dx = s.x - dog.x, dz = s.z - dog.z, d = Math.hypot(dx, dz) || 1;
+    if (d < FR) { const k = Math.pow(1 - d / FR, 1.5) * 260; ax += dx / d * k; az += dz / d * k; fl = 1 - d / FR; }
+    for (const w of g.wolves) { const wx = s.x - w.x, wz = s.z - w.z, wd = Math.hypot(wx, wz) || 1; if (wd < 26) { const k = Math.pow(1 - wd / 26, 1.5) * 200; ax += wx / wd * k; az += wz / wd * k; fl = Math.max(fl, 1 - wd / 26); } }
+    for (const o of sh) {
+      if (o === s || o.penned) continue; const ox = o.x - s.x, oz = o.z - s.z, od = Math.hypot(ox, oz) || 1;
+      if (od < 16) { ax += ox * 0.25; az += oz * 0.25; } if (od < 5) { ax -= ox / od * (5 - od) * 30; az -= oz / od * (5 - od) * 30; }
+    }
+    if (fl === 0) { s.wa += (Math.random() - .5) * 3 * dt; ax += Math.cos(s.wa) * 5; az += Math.sin(s.wa) * 5; }
+    s.flee = fl; s.vx += ax * dt; s.vz += az * dt; const k = Math.exp(-2.4 * dt); s.vx *= k; s.vz *= k;
+    const sp = Math.hypot(s.vx, s.vz); if (sp > 30) { s.vx *= 30 / sp; s.vz *= 30 / sp; } if (Math.abs(s.vx) > 1) s.face = s.vx > 0 ? 1 : -1;
+    const px = s.x; s.x += s.vx * dt; s.z += s.vz * dt;
+    const bx = WW / 2 - 4; if (s.x < -bx) { s.x = -bx; s.vx = Math.abs(s.vx) * 0.5; } if (s.x > bx) { s.x = bx; s.vx = -Math.abs(s.vx) * 0.5; }
+    if (s.z < 4) { s.z = 4; s.vz = Math.abs(s.vz) * 0.5; } if (s.z > D - 3) { s.z = D - 3; s.vz = -Math.abs(s.vz) * 0.5; }
+    if (s.z > D - PEN_Z) {
+      const ax2 = Math.abs(s.x);
+      if (ax2 > PEN_X - 2.5 && ax2 < PEN_X + 2.5) { const sg = s.x < 0 ? -1 : 1; s.x = Math.abs(px) >= PEN_X ? sg * (PEN_X + 2.5) : sg * (PEN_X - 2.5); s.vx = 0; }
+    }
+    if (state === STATES.PLAYING && s.z > D - PEN_Z + 4 && Math.abs(s.x) < PEN_X - 3) {
+      s.penned = true; g.penned++; g.combo = g.comboT > 0 ? g.combo + 1 : 1; g.comboT = 3.5;
+      const pts = Math.round(100 * (1 + Math.min(g.combo - 1, 5) * 0.25)); g.score += pts; sfx.baa();
+      popup('+' + pts, '#fff3a0', s.x, s.z); puff(s.x, s.z, 8, '#ffffff');
+    }
+  }
+}
+function updateWolves(dt) {
+  const g = G, maxW = g.level >= 5 ? 2 : g.level >= 2 ? 1 : 0;
+  g.wolfT -= dt;
+  if (g.wolfT <= 0 && g.wolves.length < maxW) { g.wolves.push({ x: (Math.random() < .5 ? -1 : 1) * (WW / 2 + 2), z: 40 + Math.random() * 30, fleeT: 0, leaving: false, face: 1 }); g.wolfT = 10; sfx.howl(); }
+  for (let i = g.wolves.length - 1; i >= 0; i--) {
+    const w = g.wolves[i], sp0 = 14 + 2 * g.level;
+    const dd = Math.hypot(w.x - g.dog.x, w.z - g.dog.z);
+    if (!w.leaving && dd < 16 && w.fleeT <= 0) w.fleeT = 2.5;
+    let vx = 0, vz = 0, sp = sp0;
+    if (w.leaving) { vx = w.x < 0 ? -1 : 1; sp = 24; }
+    else if (w.fleeT > 0) { w.fleeT -= dt; const dx = w.x - g.dog.x, dz = w.z - g.dog.z, d = Math.hypot(dx, dz) || 1; vx = dx / d; vz = dz / d; sp = 26; }
+    else {
+      let tgt = null, bd = 1e9; for (const s of g.sheep) { if (s.penned) continue; const d = Math.hypot(s.x - w.x, s.z - w.z); if (d < bd) { bd = d; tgt = s; } }
+      if (!tgt) { w.leaving = true; continue; }
+      vx = (tgt.x - w.x) / bd; vz = (tgt.z - w.z) / bd;
+      if (bd < 3.4) {
+        g.sheep.splice(g.sheep.indexOf(tgt), 1); g.lost++; w.leaving = true; g.combo = 0; g.shake = 0.7; sfx.steal(); popup('SHEEP LOST!', '#ff6a5a', tgt.x, tgt.z);
+        g.lives--; if (g.lives <= 0) { finish('THE WOLVES WON'); return; }
+      }
+    }
+    w.x += vx * sp * dt; w.z = clamp(w.z + vz * sp * dt, 2, D - 2); if (Math.abs(vx) > 0.1) w.face = vx > 0 ? 1 : -1;
+    if (Math.abs(w.x) > WW / 2 + 6 && w.leaving) g.wolves.splice(i, 1);
+  }
+}
+function update(dt) {
+  const g = G, playing = state === STATES.PLAYING;
+  g.t += dt; g.shake = Math.max(0, g.shake - dt * 2.5); g.bark = Math.max(0, g.bark - dt); g.barkFx = Math.max(0, g.barkFx - dt); g.comboT -= dt; if (g.comboT <= 0) g.combo = 0;
+  for (let i = g.popups.length - 1; i >= 0; i--) { const p = g.popups[i]; p.life -= dt * 0.9; p.y -= dt * 36; if (p.life <= 0) g.popups.splice(i, 1); }
+  for (let i = g.parts.length - 1; i >= 0; i--) { const p = g.parts[i]; p.life -= dt; p.vy += 300 * dt; p.x += p.vx * dt; p.y += p.vy * dt; if (p.life <= 0) g.parts.splice(i, 1); }
+  if (playing) {
+    const kx = keys.r - keys.l, kz = keys.u - keys.d;
+    if (kx || kz) { g.tx = clamp(g.tx + kx * dt * 70, -WW / 2, WW / 2); g.tz = clamp(g.tz + kz * dt * 70, 0, D); }
+    const dx = g.tx - g.dog.x, dz = g.tz - g.dog.z, d = Math.hypot(dx, dz), sp = Math.min(48, d * 6);
+    const tvx = d > 0.05 ? dx / d * sp : 0, tvz = d > 0.05 ? dz / d * sp : 0, k = 1 - Math.exp(-dt * 10);
+    g.dog.vx += (tvx - g.dog.vx) * k; g.dog.vz += (tvz - g.dog.vz) * k;
+    g.dog.x = clamp(g.dog.x + g.dog.vx * dt, -WW / 2, WW / 2); g.dog.z = clamp(g.dog.z + g.dog.vz * dt, 0, D);
+    if (Math.abs(g.dog.vx) > 2) g.dog.face = g.dog.vx > 0 ? 1 : -1;
+    g.time -= dt; if (g.time <= 0) { finish('NIGHT FELL'); return; }
+  }
+  if (playing || state === STATES.START || state === STATES.BETWEEN) updateSheep(dt);
+  if (playing) {
+    updateWolves(dt); if (state !== STATES.PLAYING) return;
+    if (g.sheep.every(s => s.penned)) {
+      const bonus = Math.round(g.time * 5 * (1 + g.level * 0.2)); g.score += bonus; popup('FLOCK SAFE! +' + bonus, '#fff3a0', 0, D * 0.5);
+      sfx.done(); state = STATES.BETWEEN; g.between = 0; g.wolves = [];
+      const s = Math.floor(g.score); if (s > best) { best = s; store.set('sheepdog.best', String(best)); }
+    }
+  } else if (state === STATES.BETWEEN) {
+    g.between += dt; if (g.between > 2) { g.level++; newLevel(); g.dog.x = 0; g.dog.z = 6; g.tx = 0; g.tz = 6; state = STATES.PLAYING; }
+  }
+}
+
+/* ---------- input ---------- */
+function setTarget(e) {
+  if (state !== STATES.PLAYING) return;
+  const sy = clamp(e.clientY - (e.pointerType === 'touch' ? 55 : 0), yF + 2, yN), u = unproj(e.clientX, sy);
+  G.tx = clamp(u.x, -WW / 2, WW / 2); G.tz = clamp(u.z, 0, D); G.tapped = true;
+}
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault(); audio();
+  if (state === STATES.START) startGame();
+  else if (state === STATES.GAMEOVER) { if (performance.now() - overAt > 700) startGame(); }
+  else { setTarget(e); doBark(); }
+});
+cv.addEventListener('pointermove', setTarget);
+addEventListener('keydown', e => {
+  const c = e.code;
+  if (c === 'ArrowLeft' || c === 'KeyA') keys.l = 1; else if (c === 'ArrowRight' || c === 'KeyD') keys.r = 1;
+  else if (c === 'ArrowUp' || c === 'KeyW') keys.u = 1; else if (c === 'ArrowDown' || c === 'KeyS') keys.d = 1;
+  else if (c === 'Space' || c === 'Enter') { if (e.repeat) { e.preventDefault(); return; } audio(); if (state === STATES.START) startGame(); else if (state === STATES.GAMEOVER) { if (performance.now() - overAt > 700) startGame(); } else doBark(); }
+  else return;
+  g_tapped(); e.preventDefault();
+});
+function g_tapped() { if (G) G.tapped = true; }
+addEventListener('keyup', e => {
+  const c = e.code;
+  if (c === 'ArrowLeft' || c === 'KeyA') keys.l = 0; else if (c === 'ArrowRight' || c === 'KeyD') keys.r = 0;
+  else if (c === 'ArrowUp' || c === 'KeyW') keys.u = 0; else if (c === 'ArrowDown' || c === 'KeyS') keys.d = 0;
+});
+
+/* ---------- drawing ---------- */
+function txt(s, x, y, size, col, weight, alpha) {
+  ctx.globalAlpha = alpha == null ? 1 : alpha; ctx.fillStyle = col;
+  ctx.font = (weight || 'bold') + ' ' + size + 'px system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(s, x, y); ctx.globalAlpha = 1;
+}
+const ell = (x, y, rx, ry, col) => { ctx.fillStyle = col; ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, TAU); ctx.fill(); };
+function drawSheep(s, now) {
+  const p = proj(s.x, s.z), r = 4 * p.s, moving = Math.hypot(s.vx, s.vz) > 3, bob = moving ? Math.abs(Math.sin(now * 0.014 + s.id)) * r * 0.25 : 0, y = p.y - r * 0.7 - bob;
+  ell(p.x, p.y, r * 1.05, r * 0.4, 'rgba(0,0,0,0.25)');
+  ctx.fillStyle = '#2f2f2f'; ctx.fillRect(p.x - r * 0.45, y + r * 0.5, r * 0.18, r * 0.6 + bob); ctx.fillRect(p.x + r * 0.3, y + r * 0.5, r * 0.18, r * 0.6 + bob);
+  ell(p.x, y + r * 0.1, r * 0.95, r * 0.7, '#dcdcd0');
+  for (const [ox, oy, rr] of [[-0.5, -0.1, 0.55], [0.1, -0.35, 0.6], [0.55, 0, 0.5], [-0.1, 0.1, 0.6]]) ell(p.x + ox * r, y + oy * r, rr * r, rr * r, '#f8f8f2');
+  const hx = p.x + s.face * r * 0.95; ell(hx, y + r * 0.05, r * 0.38, r * 0.34, '#3a3a3a'); ell(hx + s.face * r * 0.1, y - r * 0.12, r * 0.12, r * 0.08, '#fff');
+  if (s.flee > 0.2 && !s.penned) txt('!', p.x, y - r * 1.3, Math.max(10, r * 0.9), '#ff5a4a');
+}
+function drawDog(g, now) {
+  const d = g.dog, p = proj(d.x, d.z), r = 4.5 * p.s, run = Math.hypot(d.vx, d.vz) > 4, bob = run ? Math.abs(Math.sin(now * 0.02)) * r * 0.2 : 0, y = p.y - r * 0.8 - bob, fc = d.face;
+  ell(p.x, p.y, r * 1.1, r * 0.4, 'rgba(0,0,0,0.3)');
+  ctx.fillStyle = '#5a3a1a'; ctx.fillRect(p.x - r * 0.55, y + r * 0.45, r * 0.2, r * 0.7 + bob); ctx.fillRect(p.x + r * 0.35, y + r * 0.45, r * 0.2, r * 0.7 + bob);
+  ctx.strokeStyle = '#6b4423'; ctx.lineWidth = Math.max(2, r * 0.22); ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(p.x - fc * r * 0.9, y); ctx.lineTo(p.x - fc * r * 1.35, y - r * 0.4 + Math.sin(now * 0.03) * r * 0.25); ctx.stroke();
+  ell(p.x, y + r * 0.1, r * 1.0, r * 0.62, '#8a5a2b'); ell(p.x + fc * r * 0.1, y + r * 0.3, r * 0.6, r * 0.3, '#e9d2a8');
+  const hx = p.x + fc * r * 0.95, hyy = y - r * 0.25; ell(hx, hyy, r * 0.5, r * 0.45, '#8a5a2b');
+  ell(hx - fc * r * 0.3, hyy - r * 0.25, r * 0.16, r * 0.3, '#4a2e12'); ell(hx + fc * r * 0.45, hyy + r * 0.1, r * 0.22, r * 0.16, '#222'); ell(hx + fc * r * 0.12, hyy - r * 0.08, r * 0.07, r * 0.07, '#fff');
+}
+function drawWolf(w, now) {
+  const p = proj(w.x, w.z), r = 5 * p.s, y = p.y - r * 0.8 - Math.abs(Math.sin(now * 0.02)) * r * 0.2, fc = w.face;
+  ell(p.x, p.y, r * 1.2, r * 0.4, 'rgba(0,0,0,0.3)');
+  ctx.fillStyle = '#3d3d46'; ctx.fillRect(p.x - r * 0.6, y + r * 0.4, r * 0.2, r * 0.75); ctx.fillRect(p.x + r * 0.4, y + r * 0.4, r * 0.2, r * 0.75);
+  ell(p.x, y + r * 0.1, r * 1.1, r * 0.6, '#6c6c78'); const hx = p.x + fc * r * 1.0, hyy = y - r * 0.2; ell(hx, hyy, r * 0.5, r * 0.42, '#6c6c78');
+  ctx.fillStyle = '#6c6c78'; ctx.beginPath(); ctx.moveTo(hx - fc * r * 0.3, hyy - r * 0.3); ctx.lineTo(hx - fc * r * 0.15, hyy - r * 0.8); ctx.lineTo(hx + fc * r * 0.05, hyy - r * 0.35); ctx.fill();
+  ell(hx + fc * r * 0.2, hyy - r * 0.05, r * 0.09, r * 0.09, '#ff3030'); ell(hx + fc * r * 0.55, hyy + r * 0.12, r * 0.2, r * 0.14, '#222');
+}
+function drawTree(t) {
+  const x = t.side * (WW / 2 + 5), p = proj(x, t.z), r = 7 * p.s * t.k;
+  ctx.fillStyle = '#5a3a22'; ctx.fillRect(p.x - r * 0.15, p.y - r * 0.9, r * 0.3, r * 0.9);
+  ell(p.x, p.y - r * 1.5, r * 0.9, r * 0.9, '#2f6b2e'); ell(p.x - r * 0.3, p.y - r * 1.7, r * 0.6, r * 0.6, '#3d8a3a');
+}
+function fence(x0, z0, x1, z1) {
+  const a = proj(x0, z0), b = proj(x1, z1); ctx.strokeStyle = '#d9b58a'; ctx.lineWidth = Math.max(1.5, 0.5 * a.s);
+  for (const h of [2, 4.2]) { ctx.beginPath(); ctx.moveTo(a.x, a.y - h * a.s); ctx.lineTo(b.x, b.y - h * b.s); ctx.stroke(); }
+  const n = 6; for (let i = 0; i <= n; i++) { const x = x0 + (x1 - x0) * i / n, z = z0 + (z1 - z0) * i / n, p = proj(x, z); ctx.fillStyle = '#b98a58'; ctx.fillRect(p.x - p.s * 0.3, p.y - 5 * p.s, p.s * 0.6, 5 * p.s); }
+}
+function draw(now) {
+  const g = G, k = state === STATES.START ? 0 : clamp(1 - g.time / g.T, 0, 1), pulse = Math.sin(now * 0.008);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const top = k < 0.6 ? mix([126, 200, 255], [255, 150, 90], k / 0.6) : mix([255, 150, 90], [42, 26, 74], (k - 0.6) / 0.4), bot = mix([216, 240, 255], [255, 184, 112], Math.min(1, k * 1.2));
+  const sky = ctx.createLinearGradient(0, 0, 0, hy + 20); sky.addColorStop(0, rgb(top)); sky.addColorStop(1, rgb(bot)); ctx.fillStyle = sky; ctx.fillRect(0, 0, W, hy + 20);
+  const sx = W * (0.2 + 0.6 * k), sy = hy - 20 - Math.sin(k * Math.PI) * hy * 0.35 + k * 40; ctx.fillStyle = 'rgba(255,240,180,0.9)'; ctx.beginPath(); ctx.arc(sx, sy, 22, 0, TAU); ctx.fill();
+  ctx.fillStyle = rgb(mix([86, 140, 90], [40, 50, 70], k)); ctx.beginPath(); ctx.moveTo(0, hy + 20);
+  for (let x = 0; x <= W; x += 20) ctx.lineTo(x, hy - 14 - 16 * Math.sin(x * 0.012) - 10 * Math.sin(x * 0.03 + 1)); ctx.lineTo(W, hy + 20); ctx.fill();
+  const gr = ctx.createLinearGradient(0, hy, 0, H); gr.addColorStop(0, rgb(mix([88, 160, 70], [50, 80, 60], k))); gr.addColorStop(1, rgb(mix([52, 120, 48], [30, 56, 44], k))); ctx.fillStyle = gr; ctx.fillRect(0, hy, W, H - hy);
+  for (let j = 0; j < 10; j++) {
+    if (j % 2) continue; const a = proj(-WW / 2, j * D / 10), b = proj(WW / 2, j * D / 10), c = proj(WW / 2, (j + 1) * D / 10), d = proj(-WW / 2, (j + 1) * D / 10);
+    ctx.fillStyle = 'rgba(255,255,255,0.06)'; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.lineTo(c.x, c.y); ctx.lineTo(d.x, d.y); ctx.fill();
+  }
+  const bp = proj(0, D + 8), bs = bp.s * 14;
+  ctx.fillStyle = rgb(mix([170, 50, 40], [80, 30, 40], k)); ctx.fillRect(bp.x - bs, bp.y - bs * 1.1, bs * 2, bs * 1.1);
+  ctx.fillStyle = rgb(mix([110, 30, 26], [50, 20, 26], k)); ctx.beginPath(); ctx.moveTo(bp.x - bs * 1.15, bp.y - bs * 1.1); ctx.lineTo(bp.x, bp.y - bs * 1.8); ctx.lineTo(bp.x + bs * 1.15, bp.y - bs * 1.1); ctx.fill();
+  ctx.fillStyle = '#f0e6d2'; ctx.fillRect(bp.x - bs * 0.35, bp.y - bs * 0.7, bs * 0.7, bs * 0.7);
+
+  ctx.save();
+  if (g.shake > 0) ctx.translate((Math.random() - .5) * 12 * g.shake, (Math.random() - .5) * 12 * g.shake);
+  const ends = proj(-PEN_X, D - PEN_Z), ende = proj(PEN_X, D - PEN_Z);
+  ctx.fillStyle = 'rgba(120,90,50,0.35)'; const pa = proj(-PEN_X, D), pb = proj(PEN_X, D); ctx.beginPath(); ctx.moveTo(ends.x, ends.y); ctx.lineTo(ende.x, ende.y); ctx.lineTo(pb.x, pb.y); ctx.lineTo(pa.x, pa.y); ctx.fill();
+  fence(-PEN_X, D, PEN_X, D);
+  const items = [...g.sheep.map(o => ({ z: o.z, o, t: 0 })), { z: g.dog.z, o: g.dog, t: 1 }, ...g.wolves.map(o => ({ z: o.z, o, t: 2 })), ...trees.map(o => ({ z: o.z, o, t: 3 }))].sort((a, b) => b.z - a.z);
+  if (state !== STATES.GAMEOVER || true) {
+    const dp = proj(g.dog.x, g.dog.z), rr = FR * dp.s; ctx.strokeStyle = 'rgba(255,255,255,0.18)'; ctx.lineWidth = 2; ctx.setLineDash([6, 8]); ctx.beginPath(); ctx.ellipse(dp.x, dp.y, rr, rr * camH * dp.s / f, 0, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+    if (g.barkFx > 0) { const u = 1 - g.barkFx / 0.5, br = 28 * dp.s * u; ctx.strokeStyle = 'rgba(255,255,255,' + (1 - u) + ')'; ctx.lineWidth = 4; ctx.beginPath(); ctx.ellipse(dp.x, dp.y, br, br * camH * dp.s / f, 0, 0, TAU); ctx.stroke(); }
+  }
+  for (const it of items) { if (it.t === 0) drawSheep(it.o, now); else if (it.t === 1) drawDog(g, now); else if (it.t === 2) drawWolf(it.o, now); else drawTree(it.o); }
+  fence(-PEN_X, D - PEN_Z, -PEN_X, D); fence(PEN_X, D - PEN_Z, PEN_X, D);
+  ctx.restore();
+  if (k > 0.5) { ctx.fillStyle = 'rgba(10,10,40,' + (k - 0.5) * 0.45 + ')'; ctx.fillRect(0, 0, W, H); }
+  for (const p of g.parts) { ctx.globalAlpha = clamp(p.life * 2, 0, 1); ctx.fillStyle = p.col; ctx.fillRect(p.x, p.y, p.sz, p.sz); }
+  ctx.globalAlpha = 1;
+  for (const p of g.popups) txt(p.t, p.x, p.y, 20, p.col, 'bold', clamp(p.life * 1.5, 0, 1));
+
+  const ty = safeTop + 30, ink = '#fffbe8';
+  if (state === STATES.PLAYING || state === STATES.BETWEEN) {
+    txt(String(Math.floor(g.score)), W / 2, ty, 34, ink);
+    const bw = Math.min(240, W * 0.5), fr = clamp(g.time / g.T, 0, 1);
+    ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.fillRect(W / 2 - bw / 2, ty + 24, bw, 8); ctx.fillStyle = fr < 0.25 ? '#ff5a4a' : '#ffd24a'; ctx.fillRect(W / 2 - bw / 2, ty + 24, bw * fr, 8);
+    txt('SUNSET', W / 2, ty + 46, 11, ink, 'bold', 0.8);
+    txt('LEVEL ' + (g.level + 1) + '   PENNED ' + g.penned + '/' + (g.n - g.lost) + (g.combo > 1 ? '   x' + (1 + Math.min(g.combo - 1, 5) * 0.25).toFixed(2) : ''), W / 2, ty + 66, 13, ink, 'bold', 0.9);
+    txt('\u2665'.repeat(Math.max(0, g.lives)), W - 44, safeTop + 22, 22, '#ff6a5a'); txt('BEST ' + best, 44, safeTop + 22, 12, ink, 'bold', 0.7);
+    if (state === STATES.PLAYING && !g.tapped) { txt('Drag to move the sheepdog. Sheep run away from you!', W / 2, H * 0.52, Math.min(18, W / 21), ink, 'bold', 0.75 + 0.25 * pulse); txt('Herd them into the pen. Tap to bark!', W / 2, H * 0.52 + 28, Math.min(16, W / 24), ink, 'bold', 0.7); }
+  } else if (state === STATES.START) {
+    ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(0, 0, W, safeTop + 190);
+    txt('SHEEPDOG SUNSET', W / 2, safeTop + 62, Math.min(50, W / 8), ink);
+    txt('Herd the flock into the pen before the sun sets', W / 2, safeTop + 102, Math.min(16, W / 24), ink, 'normal', 0.9);
+    txt('Watch out for wolves. Drag to move, tap to bark.', W / 2, safeTop + 126, Math.min(15, W / 25), ink, 'normal', 0.8);
+    txt('TAP / CLICK TO START', W / 2, safeTop + 168, 22, '#fff', 'bold', 0.65 + 0.35 * pulse);
+    if (best) txt('BEST ' + best, W / 2, safeTop + 200, 15, '#ffd24a', 'bold');
+  } else if (state === STATES.GAMEOVER) {
+    ctx.fillStyle = 'rgba(10,10,30,0.6)'; ctx.fillRect(0, 0, W, H);
+    txt(reason, W / 2, H * 0.3, Math.min(44, W / 9), '#ffb09a');
+    txt('SCORE ' + Math.floor(g.score), W / 2, H * 0.3 + 50, 30, ink);
+    txt('LEVEL ' + (g.level + 1) + '   BEST ' + best, W / 2, H * 0.3 + 86, 17, '#ffd98a', 'normal');
+    if (performance.now() - overAt > 700) txt('TAP / CLICK TO RETRY', W / 2, H * 0.3 + 134, 22, ink, 'bold', 0.6 + 0.4 * pulse);
+  }
+}
+
+resize(); startLoop();
+})();
+</script>
+</body>
+</html>

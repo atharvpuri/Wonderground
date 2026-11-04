@@ -1,0 +1,1036 @@
+<!-- FILE: teppan-toss.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Teppan Toss</title>
+<style>
+:root{--bg:#1c0b09;--fg:#fff6ec;--accent:#ffb703;--jade:#06d6a0;--danger:#ef476f}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#1c0b09;--fg:#fff6ec}}
+:root[data-theme="dark"]{--bg:#1c0b09;--fg:#fff6ec}
+html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;overscroll-behavior:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+canvas{position:fixed;inset:0;display:block;touch-action:none}
+#probe{position:fixed;top:0;left:0;visibility:hidden;padding-top:env(safe-area-inset-top,0px)}
+</style>
+</head>
+<body>
+<div id="probe"></div>
+<canvas id="c"></canvas>
+<script>
+(() => {
+'use strict';
+const STATES = { START: 0, PLAYING: 1, GAMEOVER: 2 };
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), probe = document.getElementById('probe');
+const TAU = Math.PI * 2;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const rr = (a, b) => a + Math.random() * (b - a);
+
+/* ---------- storage ---------- */
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+};
+const loadTop = () => {
+  try {
+    const a = JSON.parse(store.get('teppantoss.top5') || '[]');
+    return Array.isArray(a) ? a.filter(n => typeof n === 'number' && isFinite(n)).slice(0, 5) : [];
+  } catch (e) { return []; }
+};
+let top5 = loadTop();
+let bestServed = parseInt(store.get('teppantoss.served') || '0', 10) || 0;
+let bestStreak = parseInt(store.get('teppantoss.streak') || '0', 10) || 0;
+function saveScore(sc, sv, st) {
+  const s = Math.floor(sc);
+  const a = top5.slice(); a.push(s); a.sort((x, y) => y - x); top5 = a.slice(0, 5);
+  store.set('teppantoss.top5', JSON.stringify(top5));
+  if (sv > bestServed) { bestServed = sv; store.set('teppantoss.served', String(bestServed)); }
+  if (st > bestStreak) { bestStreak = st; store.set('teppantoss.streak', String(bestStreak)); }
+  return s > 0 ? top5.indexOf(s) : -1;
+}
+
+/* ---------- canvas & 2.5D grill projection ---------- */
+let W = 0, H = 0, dpr = 1, safeTop = 0, S = 1, OX = 0, OY = 0;
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 3);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  safeTop = probe.offsetHeight || 0;
+  const availW = W - 20;
+  const availH = H - safeTop - 105;
+  S = Math.max(0.55, Math.min(availW / 370, availH / 520));
+  OX = W * 0.5;
+  OY = safeTop + 88 + availH * 0.54;
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 120));
+
+const P = (wx, wy, wz = 0) => {
+  const depthScale = 1 + wy * 0.00075;
+  return {
+    x: OX + wx * depthScale * S,
+    y: OY + wy * 0.82 * S - wz * S,
+    s: depthScale * S
+  };
+};
+const unP = (sx, sy) => {
+  const wy = (sy - OY) / (0.82 * S);
+  const depthScale = 1 + clamp(wy, -280, 240) * 0.00075;
+  const wx = (sx - OX) / (depthScale * S);
+  return { x: wx, y: wy };
+};
+
+/* ---------- audio engine ---------- */
+let AC = null, noiseBuf = null, sizzleGain = null;
+function audio() {
+  if (!AC) {
+    try {
+      const C = window.AudioContext || window.webkitAudioContext;
+      if (C) {
+        AC = new C();
+        noiseBuf = AC.createBuffer(1, AC.sampleRate, AC.sampleRate);
+        const d = noiseBuf.getChannelData(0);
+        for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+        setupSizzle();
+      }
+    } catch (e) { AC = null; }
+  }
+  if (AC && AC.state === 'suspended') AC.resume();
+  return AC;
+}
+function setupSizzle() {
+  if (!AC || !noiseBuf) return;
+  try {
+    const src = AC.createBufferSource(), f = AC.createBiquadFilter();
+    src.buffer = noiseBuf; src.loop = true;
+    f.type = 'bandpass'; f.frequency.value = 3400; f.Q.value = 1.4;
+    sizzleGain = AC.createGain();
+    sizzleGain.gain.value = 0.0001;
+    src.connect(f); f.connect(sizzleGain); sizzleGain.connect(AC.destination);
+    src.start();
+  } catch (e) {}
+}
+function updateSizzle(activeCount) {
+  if (!AC || !sizzleGain) return;
+  const vol = state === STATES.PLAYING && activeCount > 0 ? clamp(0.015 + activeCount * 0.014, 0, 0.085) : 0.0001;
+  sizzleGain.gain.setTargetAtTime(vol, AC.currentTime, 0.08);
+}
+function tone(type, f0, f1, dur, vol, delay = 0) {
+  const a = audio(); if (!a) return;
+  try {
+    const o = a.createOscillator(), g = a.createGain(), t = a.currentTime + delay;
+    o.type = type; o.frequency.setValueAtTime(f0, t);
+    o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(a.destination);
+    o.start(t); o.stop(t + dur + 0.03);
+  } catch (e) {}
+}
+function noise(dur, vol, freq, type = 'bandpass') {
+  const a = audio(); if (!a || !noiseBuf) return;
+  try {
+    const s = a.createBufferSource(), f = AC.createBiquadFilter(), g = a.createGain(), t = a.currentTime;
+    s.buffer = noiseBuf; f.type = type; f.frequency.value = freq;
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    s.connect(f); f.connect(g); g.connect(a.destination);
+    s.start(t); s.stop(t + dur + 0.02);
+  } catch (e) {}
+}
+const sfx = {
+  flip() {
+    tone('triangle', 920, 1480, 0.075, 0.11);
+    noise(0.08, 0.14, 2600, 'highpass');
+  },
+  serve(streak, isPerf) {
+    const base = (isPerf ? 659.25 : 523.25) * Math.pow(1.0595, Math.min(streak, 15));
+    tone('sine', base, base * 1.5, 0.18, 0.16);
+    tone('triangle', base * 1.5, base * 2.0, 0.24, 0.12, 0.06);
+  },
+  flambe() {
+    noise(0.55, 0.35, 580, 'lowpass');
+    [440, 554.37, 659.25, 880].forEach((f, i) => tone('triangle', f, f * 1.25, 0.28, 0.11, i * 0.05));
+  },
+  burn() {
+    noise(0.32, 0.28, 800, 'lowpass');
+    tone('sawtooth', 180, 42, 0.38, 0.22);
+    tone('square', 110, 32, 0.34, 0.15);
+  },
+  raw() {
+    tone('sawtooth', 260, 130, 0.24, 0.16);
+  },
+  start() { tone('triangle', 392, 784, 0.15, 0.12); },
+  over() { tone('sawtooth', 330, 38, 0.85, 0.16); }
+};
+
+/* ---------- food & guest definitions ---------- */
+const FOODS = [
+  { id: 'wagyu',   name: 'WAGYU',   pts: 120, rate: 0.20, r: 22 },
+  { id: 'shrimp',  name: 'SHRIMP',  pts: 100, rate: 0.25, r: 20 },
+  { id: 'scallop', name: 'SCALLOP', pts: 150, rate: 0.28, r: 19 },
+  { id: 'lobster', name: 'LOBSTER', pts: 260, rate: 0.22, r: 24 }
+];
+const SLOTS = [-108, 0, 108];
+const GUEST_Y = -205;
+const BURNERS = [
+  { x: -75, y: 20 },
+  { x:  75, y: 20 },
+  { x:   0, y: 98 }
+];
+
+/* ---------- game state ---------- */
+let state = STATES.START, G = null, raf = 0, last = 0, overAt = 0;
+const drag = { id: null, item: null, sx: 0, sy: 0, cx: 0, cy: 0, t0: 0 };
+
+function pickWantedType() {
+  const g = G;
+  const grillTypes = g.items.filter(it => !it.air && it.c1 < 1.35 && it.c2 < 1.35).map(it => it.type.id);
+  if (grillTypes.length && Math.random() < 0.72) {
+    const id = grillTypes[Math.floor(Math.random() * grillTypes.length)];
+    return FOODS.find(f => f.id === id);
+  }
+  const pool = g.t > 18 ? FOODS : FOODS.slice(0, 3);
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function spawnGuest(slotIdx) {
+  const g = G, diff = g.diff;
+  const maxPat = lerp(17, 9.5, diff);
+  g.guests[slotIdx] = {
+    slot: slotIdx,
+    x: SLOTS[slotIdx],
+    y: GUEST_Y,
+    vx: g.t > 25 ? (slotIdx % 2 === 0 ? 1 : -1) * lerp(0, 18, diff) : 0,
+    want: pickWantedType(),
+    pat: maxPat,
+    maxPat,
+    eatAnim: 0
+  };
+}
+
+function spawnFood() {
+  const g = G;
+  // Pick a guest's wanted item if not currently on the grill
+  let type = FOODS[Math.floor(Math.random() * (g.t > 16 ? 4 : 3))];
+  const needed = g.guests.filter(Boolean).map(gu => gu.want).filter(w => !g.items.some(it => it.type.id === w.id));
+  if (needed.length) type = needed[Math.floor(Math.random() * needed.length)];
+
+  for (let tr = 0; tr < 18; tr++) {
+    const x = rr(-115, 115), y = rr(-35, 130);
+    if (g.items.every(o => Math.hypot(o.x - x, o.y - y) > 48)) {
+      g.items.push({
+        type, x, y, z: 90,
+        vx: 0, vy: 0, vz: -120,
+        side: 0, // 0 = cooking c1, 1 = cooking c2
+        c1: 0, c2: 0,
+        flipA: 0, air: false,
+        smokeT: 0
+      });
+      break;
+    }
+  }
+}
+
+function resetGame() {
+  G = {
+    t: 0, diff: 0, score: 0, lives: 3, streak: 0, maxStreak: 0, served: 0,
+    flambe: 0, flambeT: 0,
+    burnerIdx: 0, burnerT: 4.5,
+    guests: [null, null, null], guestT: 0.4,
+    items: [], foodT: 0.2,
+    parts: [], pops: [], flames: [],
+    spatX: 0, spatY: 110,
+    shake: 0, slowmo: 1, flash: 0, hint: 1,
+    rank: -1, hiNew: false, reason: '', saved: false
+  };
+  spawnGuest(1);
+  spawnFood();
+  spawnFood();
+}
+
+/* ---------- loop control ---------- */
+function stopLoop() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+function startLoop() { stopLoop(); last = performance.now(); raf = requestAnimationFrame(frame); }
+function frame(now) {
+  raf = requestAnimationFrame(frame);
+  const rawDt = Math.min(0.033, Math.max(0.001, (now - last) / 1000));
+  last = now;
+  update(rawDt * (G ? G.slowmo : 1), rawDt);
+  draw(now);
+}
+document.addEventListener('visibilitychange', () => {
+  drag.id = null; drag.item = null;
+  updateSizzle(0);
+  document.hidden ? stopLoop() : startLoop();
+});
+window.addEventListener('blur', () => { drag.id = null; drag.item = null; updateSizzle(0); });
+
+function startGame() {
+  stopLoop();
+  drag.id = null; drag.item = null;
+  resetGame();
+  state = STATES.PLAYING;
+  sfx.start();
+  startLoop();
+}
+
+/* ---------- helpers & juice ---------- */
+const mult = () => (1 + Math.min(G.streak, 16) * 0.25) * (G.flambeT > 0 ? 2 : 1);
+function pop(t, col, wx, wy, sz = 19) {
+  const s = P(wx, wy, 24);
+  G.pops.push({ t, col, x: s.x, y: s.y, sz, l: 1.1 });
+}
+function burst(wx, wy, wz, n, cols, sp = 170) {
+  const s = P(wx, wy, wz);
+  for (let i = 0; i < n && G.parts.length < 260; i++) {
+    const a = Math.random() * TAU, v = sp * rr(0.35, 1.15);
+    G.parts.push({ x: s.x, y: s.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 50, l: rr(0.35, 0.8), m: 0.8, c: cols[i % cols.length], r: rr(2, 4.5) });
+  }
+}
+
+function loseHat(why, wx, wy) {
+  const g = G;
+  g.lives--;
+  g.streak = 0;
+  g.shake = 15;
+  g.flash = 0.65;
+  sfx.burn();
+  burst(wx, wy, 10, 26, ['#ef476f', '#ffb703', '#343a40'], 220);
+  pop(why, '#ef476f', wx, wy, 22);
+  if (g.lives <= 0) {
+    g.reason = why;
+    endGame();
+  }
+}
+
+function endGame() {
+  if (G.saved) return;
+  G.saved = true;
+  updateSizzle(0);
+  state = STATES.GAMEOVER;
+  overAt = performance.now();
+  const prior = top5[0] || 0;
+  G.rank = saveScore(G.score, G.served, G.maxStreak);
+  G.hiNew = G.score > prior && G.score > 0;
+  sfx.over();
+}
+
+function flipItem(it) {
+  if (it.air) return;
+  it.side = 1 - it.side;
+  it.z = Math.max(it.z, 2);
+  it.vz = 175;
+  it.flipA = Math.PI;
+  sfx.flip();
+  burst(it.x, it.y, 6, 8, ['#ffd166', '#ffffff'], 110);
+  G.spatX = it.x; G.spatY = it.y + 18;
+}
+
+function flickItem(it, vx, vy) {
+  it.air = true;
+  it.vx = vx;
+  it.vy = vy;
+  it.vz = 230;
+  it.flipA = TAU;
+  sfx.flip();
+  G.spatX = it.x; G.spatY = it.y + 18;
+}
+
+function evaluateServe(it, gu, slotIdx) {
+  const g = G;
+  const wrongFood = it.type.id !== gu.want.id;
+  const minCook = Math.min(it.c1, it.c2);
+  const maxCook = Math.max(it.c1, it.c2);
+
+  if (wrongFood) {
+    sfx.raw();
+    g.streak = 0;
+    pop('WRONG ORDER!', '#ff922b', gu.x, gu.y + 30, 19);
+    // Bounce back onto the grill!
+    it.air = false; it.y = -25; it.z = 0; it.vx = 0; it.vy = 0; it.vz = 0;
+    return;
+  }
+
+  if (minCook < 0.55) {
+    sfx.raw();
+    g.streak = 0;
+    pop(it.c1 >= 0.55 || it.c2 >= 0.55 ? 'FLIP BOTH SIDES!' : 'STILL RAW!', '#4cc9f0', gu.x, gu.y + 30, 19);
+    it.air = false; it.y = -20; it.z = 0; it.vx = 0; it.vy = 0; it.vz = 0;
+    return;
+  }
+
+  if (maxCook >= 1.38) {
+    loseHat('SERVED BURNT FOOD!', gu.x, gu.y + 25);
+    return;
+  }
+
+  // Successful Serve!
+  const isGold1 = it.c1 >= 0.72 && it.c1 <= 1.18;
+  const isGold2 = it.c2 >= 0.72 && it.c2 <= 1.18;
+  const isDoubleGold = isGold1 && isGold2;
+
+  g.served++;
+  g.streak++;
+  g.maxStreak = Math.max(g.maxStreak, g.streak);
+  if (g.served >= 1) g.hint = Math.min(g.hint, 0.99);
+
+  const searsMult = isDoubleGold ? 2.5 : (isGold1 || isGold2 ? 1.5 : 1.0);
+  const speedBonus = Math.round((gu.pat / gu.maxPat) * 60);
+  const pts = Math.round((it.type.pts * searsMult + speedBonus) * mult());
+  g.score += pts;
+
+  sfx.serve(g.streak, isDoubleGold);
+  g.shake = isDoubleGold ? 11 : 6;
+  if (isDoubleGold) {
+    g.slowmo = 0.42;
+    g.flambe = Math.min(100, g.flambe + 34);
+    if (g.flambe >= 100 && g.flambeT <= 0) {
+      g.flambe = 0;
+      g.flambeT = 7.0;
+      sfx.flambe();
+      // Auto-sear all raw sides on the grill to golden and refill guest patience!
+      for (const o of g.items) {
+        if (!o.air) {
+          o.c1 = clamp(o.c1, 0.85, 1.0);
+          o.c2 = clamp(o.c2, 0.85, 1.0);
+        }
+      }
+      for (const oGu of g.guests) if (oGu) oGu.pat = oGu.maxPat;
+      for (let f = 0; f < 28; f++) {
+        g.flames.push({ x: rr(-130, 130), y: rr(-80, 120), r: rr(18, 38), l: rr(0.4, 0.9) });
+      }
+      pop('HIBACHI FLAMBÉ! (2X)', '#ffb703', 0, 20, 25);
+    }
+  } else {
+    g.flambe = Math.min(100, g.flambe + 15);
+  }
+
+  const label = (isDoubleGold ? 'DOUBLE GOLDEN! +' : 'ORDER UP! +') + pts;
+  pop(label, isDoubleGold ? '#ffd166' : '#06d6a0', gu.x, gu.y + 20, isDoubleGold ? 23 : 19);
+  burst(gu.x, gu.y + 18, 16, isDoubleGold ? 26 : 14, ['#ffd166', '#06d6a0', '#ffffff'], 210);
+
+  g.guests[slotIdx] = null;
+  g.guestT = Math.min(g.guestT, 0.55);
+}
+
+/* ---------- update ---------- */
+function update(dt, rawDt) {
+  const g = G;
+  g.shake *= Math.exp(-8 * rawDt);
+  g.flash = Math.max(0, g.flash - rawDt * 2.5);
+  g.slowmo += (1 - g.slowmo) * Math.min(1, rawDt * 5);
+
+  for (let i = g.parts.length - 1; i >= 0; i--) {
+    const p = g.parts[i]; p.l -= rawDt;
+    if (p.l <= 0) { g.parts.splice(i, 1); continue; }
+    p.vy += 420 * rawDt; p.x += p.vx * rawDt; p.y += p.vy * rawDt;
+  }
+  for (let i = g.pops.length - 1; i >= 0; i--) {
+    const p = g.pops[i]; p.l -= rawDt;
+    if (p.l <= 0) g.pops.splice(i, 1); else p.y -= 30 * rawDt;
+  }
+  for (let i = g.flames.length - 1; i >= 0; i--) {
+    const fl = g.flames[i]; fl.l -= rawDt;
+    if (fl.l <= 0) g.flames.splice(i, 1);
+  }
+
+  if (state !== STATES.PLAYING) return;
+
+  g.t += dt;
+  g.diff = 1 - Math.exp(-(g.score + g.t * 35) / 4200);
+  if (g.flambeT > 0) g.flambeT = Math.max(0, g.flambeT - rawDt);
+  if (g.hint < 1) g.hint = Math.max(0, g.hint - rawDt * 1.4);
+
+  // Rotate active Volcano Burner Ring
+  g.burnerT -= dt;
+  if (g.burnerT <= 0) {
+    g.burnerIdx = (g.burnerIdx + 1) % BURNERS.length;
+    g.burnerT = lerp(5.0, 2.8, g.diff);
+  }
+  const activeBurner = BURNERS[g.burnerIdx];
+
+  // Spawn Guests
+  g.guestT -= dt;
+  const maxGuests = g.t < 10 ? 2 : 3;
+  const curGuests = g.guests.filter(Boolean).length;
+  if (g.guestT <= 0 && curGuests < maxGuests) {
+    const free = [0, 1, 2].filter(i => !g.guests[i]);
+    if (free.length) {
+      spawnGuest(free[Math.floor(Math.random() * free.length)]);
+      g.guestT = lerp(2.2, 0.9, g.diff);
+    }
+  }
+
+  // Update Guests
+  for (let i = 0; i < 3; i++) {
+    const gu = g.guests[i];
+    if (!gu) continue;
+    if (gu.vx !== 0) {
+      gu.x += gu.vx * dt;
+      const center = SLOTS[i];
+      if (Math.abs(gu.x - center) > 22) {
+        gu.x = center + Math.sign(gu.x - center) * 22;
+        gu.vx *= -1;
+      }
+    }
+    gu.pat -= dt * (g.flambeT > 0 ? 0.35 : 1);
+    if (gu.pat <= 0) {
+      g.guests[i] = null;
+      loseHat('GUEST WALKED OUT!', gu.x, gu.y + 30);
+      if (state !== STATES.PLAYING) return;
+    }
+  }
+
+  // Spawn Food on Grill
+  g.foodT -= dt;
+  const maxFood = 3 + Math.min(3, Math.floor(g.diff * 3.5));
+  if (g.foodT <= 0 && g.items.length < maxFood) {
+    spawnFood();
+    g.foodT = lerp(1.6, 0.75, g.diff);
+  }
+
+  // Update Food Items
+  let grillingCount = 0;
+  for (let i = g.items.length - 1; i >= 0; i--) {
+    const it = g.items[i];
+
+    if (it.z > 0 || it.vz !== 0 || it.air) {
+      it.vz -= 680 * dt;
+      it.z += it.vz * dt;
+      it.x += it.vx * dt;
+      it.y += it.vy * dt;
+      if (it.flipA > 0) it.flipA = Math.max(0, it.flipA - dt * 12);
+
+      // Check if airborne flicked food reaches the guest counter row!
+      if (it.air && it.y <= GUEST_Y + 38) {
+        let hitSlot = -1, bestD = 54;
+        for (let s = 0; s < 3; s++) {
+          const gu = g.guests[s];
+          if (!gu) continue;
+          const d = Math.abs(it.x - gu.x);
+          if (d < bestD) { bestD = d; hitSlot = s; }
+        }
+        if (hitSlot !== -1) {
+          const gu = g.guests[hitSlot];
+          g.items.splice(i, 1);
+          evaluateServe(it, gu, hitSlot);
+          if (state !== STATES.PLAYING) return;
+          continue;
+        } else if (it.y < GUEST_Y - 25) {
+          // Missed all plates!
+          g.items.splice(i, 1);
+          g.streak = 0;
+          sfx.raw();
+          pop('MISSED PLATE!', '#adb5bd', clamp(it.x, -120, 120), GUEST_Y + 25, 18);
+          continue;
+        }
+      }
+
+      if (it.z <= 0) {
+        it.z = 0; it.vz = 0; it.vx = 0; it.vy = 0; it.flipA = 0;
+        if (it.air) {
+          it.air = false;
+          it.x = clamp(it.x, -130, 130);
+          it.y = clamp(it.y, -45, 140);
+        }
+      }
+    } else {
+      // Sizzling on the hot cast-iron Teppanyaki surface!
+      grillingCount++;
+      const onBurner = Math.hypot(it.x - activeBurner.x, it.y - activeBurner.y) < 42;
+      const heatMult = (onBurner ? 2.15 : 1.0) * (1 + g.diff * 0.45);
+      const dCook = it.type.rate * heatMult * dt;
+
+      if (it.side === 0) it.c1 += dCook;
+      else it.c2 += dCook;
+
+      const curSideCook = it.side === 0 ? it.c1 : it.c2;
+
+      // Steam / Smoke particle cues
+      it.smokeT -= dt;
+      if (it.smokeT <= 0) {
+        it.smokeT = curSideCook > 1.1 ? 0.12 : 0.28;
+        const sc = P(it.x + rr(-8, 8), it.y, 10);
+        const isDanger = curSideCook > 1.12;
+        G.parts.push({
+          x: sc.x, y: sc.y,
+          vx: rr(-15, 15), vy: rr(-75, -35),
+          l: 0.45, m: 0.45,
+          c: isDanger ? '#ef476f' : (curSideCook >= 0.72 ? '#ffd166' : 'rgba(255,255,255,0.45)'),
+          r: isDanger ? 4 : 2.8
+        });
+      }
+
+      // Burn check (charred to ash at 1.48)
+      if (curSideCook >= 1.48) {
+        const bx = it.x, by = it.y;
+        g.items.splice(i, 1);
+        loseHat(it.type.name + ' BURNT!', bx, by);
+        if (state !== STATES.PLAYING) return;
+      }
+    }
+  }
+  updateSizzle(grillingCount);
+}
+
+/* ---------- input ---------- */
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault(); audio();
+  try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+  if (state === STATES.START) { startGame(); return; }
+  if (state === STATES.GAMEOVER) { if (performance.now() - overAt > 800) startGame(); return; }
+  if (state !== STATES.PLAYING || drag.id !== null) return;
+
+  const w = unP(e.clientX, e.clientY);
+  G.spatX = clamp(w.x, -140, 140);
+  G.spatY = clamp(w.y + 18, -40, 165);
+
+  // Find nearest food on the grill within generous touch radius
+  let best = null, bestD = 48;
+  for (const it of G.items) {
+    if (it.air) continue;
+    const d = Math.hypot(it.x - w.x, it.y - w.y);
+    if (d < bestD) { bestD = d; best = it; }
+  }
+  if (best) {
+    drag.id = e.pointerId;
+    drag.item = best;
+    drag.sx = w.x; drag.sy = w.y;
+    drag.cx = w.x; drag.cy = w.y;
+    drag.t0 = performance.now();
+  }
+});
+
+cv.addEventListener('pointermove', e => {
+  if (state !== STATES.PLAYING) return;
+  const w = unP(e.clientX, e.clientY);
+  G.spatX = clamp(w.x, -140, 140);
+  G.spatY = clamp(w.y + 18, -40, 165);
+  if (e.pointerId === drag.id && drag.item) {
+    drag.cx = w.x; drag.cy = w.y;
+  }
+});
+
+function onUp(e) {
+  if (e.pointerId !== drag.id) return;
+  const it = drag.item;
+  const dx = drag.cx - drag.sx, dy = drag.cy - drag.sy;
+  drag.id = null; drag.item = null;
+
+  if (!it || state !== STATES.PLAYING || !G.items.includes(it)) return;
+
+  // Upward flick toward guest plates vs quick tap/short drag to flip!
+  if (dy < -24 && Math.hypot(dx, dy) > 26) {
+    // Calculate velocity so the food arcs toward the aimed direction at GUEST_Y
+    const flightTime = 0.42;
+    const aimAngle = Math.atan2(dy, dx);
+    const targetY = GUEST_Y + 12;
+    const distY = targetY - it.y;
+    const vy = distY / flightTime;
+    const vx = clamp((dx / Math.max(18, -dy)) * Math.abs(vy) * 0.78, -420, 420);
+    flickItem(it, vx, vy);
+  } else {
+    flipItem(it);
+  }
+}
+cv.addEventListener('pointerup', onUp);
+cv.addEventListener('pointercancel', e => { if (e.pointerId === drag.id) { drag.id = null; drag.item = null; } });
+cv.addEventListener('contextmenu', e => e.preventDefault());
+
+window.addEventListener('keydown', e => {
+  if ((e.code === 'Space' || e.code === 'Enter') && !e.repeat) {
+    e.preventDefault(); audio();
+    if (state === STATES.START) startGame();
+    else if (state === STATES.GAMEOVER && performance.now() - overAt > 800) startGame();
+  }
+});
+
+/* ---------- rendering ---------- */
+function rrect(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function txt(s, x, y, sz, col, align = 'center', maxW = 0, weight = 800) {
+  let f = sz;
+  ctx.font = weight + ' ' + f + 'px system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
+  if (maxW > 0) {
+    while (f > 9 && ctx.measureText(s).width > maxW) {
+      f--;
+      ctx.font = weight + ' ' + f + 'px system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
+    }
+  }
+  ctx.fillStyle = col; ctx.textAlign = align; ctx.textBaseline = 'middle';
+  ctx.fillText(s, x, y);
+}
+
+function cookColor(c, baseRaw) {
+  if (c < 0.72) return baseRaw;
+  if (c <= 1.18) return '#e89020'; // Golden-brown sear
+  return '#2b211e'; // Burnt char
+}
+
+function drawGrillAndCounter(now) {
+  const bg = ctx.createRadialGradient(OX, OY, 30, OX, OY, Math.max(W, H) * 0.8);
+  bg.addColorStop(0, '#361510');
+  bg.addColorStop(1, '#140705');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+  // Wooden Hinoki Guest Counter Bar at top
+  const cTL = P(-172, -245), cTR = P(172, -245);
+  const cBL = P(-172, -145), cBR = P(172, -145);
+  ctx.fillStyle = '#6e3d1e';
+  ctx.beginPath();
+  ctx.moveTo(cTL.x, cTL.y); ctx.lineTo(cTR.x, cTR.y);
+  ctx.lineTo(cBR.x, cBR.y); ctx.lineTo(cBL.x, cBL.y);
+  ctx.closePath(); ctx.fill();
+
+  // Stainless Steel Teppanyaki Rim & Dark Oiled Griddle Plate
+  const gTL = P(-162, -145), gTR = P(162, -145);
+  const gBL = P(-162, 175),  gBR = P(162, 175);
+
+  // Drop shadow under grill
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.beginPath();
+  ctx.moveTo(gTL.x - 10 * S, gTL.y + 8 * S); ctx.lineTo(gTR.x + 10 * S, gTR.y + 8 * S);
+  ctx.lineTo(gBR.x + 14 * S, gBR.y + 22 * S); ctx.lineTo(gBL.x - 14 * S, gBL.y + 22 * S);
+  ctx.closePath(); ctx.fill();
+
+  // Brushed chrome bezel
+  const cg = ctx.createLinearGradient(gBL.x, 0, gBR.x, 0);
+  cg.addColorStop(0, '#495057'); cg.addColorStop(0.5, '#adb5bd'); cg.addColorStop(1, '#343a40');
+  ctx.fillStyle = cg;
+  ctx.beginPath();
+  ctx.moveTo(gTL.x - 10 * S, gTL.y - 6 * S); ctx.lineTo(gTR.x + 10 * S, gTR.y - 6 * S);
+  ctx.lineTo(gBR.x + 12 * S, gBR.y + 12 * S); ctx.lineTo(gBL.x - 12 * S, gBL.y + 12 * S);
+  ctx.closePath(); ctx.fill();
+
+  // Seasoned black steel griddle surface
+  const pg = ctx.createLinearGradient(0, gTL.y, 0, gBL.y);
+  pg.addColorStop(0, '#16191d'); pg.addColorStop(0.45, '#212529'); pg.addColorStop(1, '#111315');
+  ctx.fillStyle = pg;
+  ctx.beginPath();
+  ctx.moveTo(gTL.x, gTL.y); ctx.lineTo(gTR.x, gTR.y);
+  ctx.lineTo(gBR.x, gBR.y); ctx.lineTo(gBL.x, gBL.y);
+  ctx.closePath(); ctx.fill();
+
+  // Burner Rings (Active Volcano Burner glows fiery orange!)
+  BURNERS.forEach((b, idx) => {
+    const bp = P(b.x, b.y, 0), r = 38 * bp.s;
+    const isAct = idx === G.burnerIdx;
+    ctx.save();
+    if (isAct) {
+      const pulse = 0.55 + 0.25 * Math.sin(now * 0.012);
+      const rg = ctx.createRadialGradient(bp.x, bp.y, r * 0.1, bp.x, bp.y, r * 1.25);
+      rg.addColorStop(0, `rgba(255, 110, 20, ${pulse})`);
+      rg.addColorStop(1, 'rgba(255, 60, 0, 0)');
+      ctx.fillStyle = rg;
+      ctx.beginPath(); ctx.ellipse(bp.x, bp.y, r * 1.25, r * 1.25 * 0.82, 0, 0, TAU); ctx.fill();
+    }
+    ctx.strokeStyle = isAct ? '#ff6b35' : 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = (isAct ? 2.5 : 1.5) * S;
+    ctx.setLineDash([6 * S, 5 * S]);
+    ctx.beginPath();
+    ctx.ellipse(bp.x, bp.y, r, r * 0.82, 0, 0, TAU);
+    ctx.stroke();
+    ctx.restore();
+  });
+
+  // Flambé Fire Wave
+  for (const fl of G.flames) {
+    const fp = P(fl.x, fl.y, 8);
+    ctx.globalAlpha = clamp(fl.l * 1.5, 0, 0.75);
+    ctx.fillStyle = '#ffb703';
+    ctx.beginPath(); ctx.arc(fp.x, fp.y, fl.r * fp.s, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawGuests(now) {
+  for (let i = 0; i < 3; i++) {
+    const sx = SLOTS[i];
+    const gu = G.guests[i];
+    const p = P(gu ? gu.x : sx, GUEST_Y, 0), u = p.s;
+
+    // Empty place mat when no guest is seated
+    if (!gu) {
+      ctx.fillStyle = 'rgba(0,0,0,0.28)';
+      ctx.beginPath(); ctx.ellipse(p.x, p.y, 26 * u, 16 * u, 0, 0, TAU); ctx.fill();
+      continue;
+    }
+
+    // Porcelain Plate
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.beginPath(); ctx.ellipse(p.x + 2 * u, p.y + 4 * u, 32 * u, 21 * u, 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#f8f9fa';
+    ctx.strokeStyle = '#adb5bd';
+    ctx.lineWidth = 2 * u;
+    ctx.beginPath(); ctx.ellipse(p.x, p.y, 31 * u, 20 * u, 0, 0, TAU);
+    ctx.fill(); ctx.stroke();
+
+    // Order Bubble & Patience Ring above plate
+    const by = p.y - 34 * u;
+    const patRatio = clamp(gu.pat / gu.maxPat, 0, 1);
+    ctx.fillStyle = 'rgba(20, 10, 8, 0.88)';
+    ctx.beginPath(); ctx.arc(p.x, by, 21 * u, 0, TAU); ctx.fill();
+
+    ctx.lineWidth = 3.5 * u;
+    ctx.strokeStyle = patRatio < 0.3 ? '#ef476f' : patRatio < 0.6 ? '#ffb703' : '#06d6a0';
+    ctx.beginPath();
+    ctx.arc(p.x, by, 21 * u, -Math.PI * 0.5, -Math.PI * 0.5 + TAU * patRatio);
+    ctx.stroke();
+
+    // Mini icon of wanted food inside order bubble
+    drawFoodIcon(gu.want.id, p.x, by - 2 * u, 11 * u, 0.9, 0.9);
+    txt(gu.want.name, p.x, by + 13 * u, Math.max(8, 8.5 * u), '#fff6ec', 'center', 38 * u, 900);
+  }
+}
+
+function drawFoodIcon(id, x, y, r, topCook, botCook) {
+  const col = cookColor(topCook, id === 'wagyu' ? '#d9383a' : id === 'shrimp' ? '#ff8fa3' : id === 'scallop' ? '#fff3d6' : '#e03131');
+  ctx.fillStyle = col;
+  if (id === 'wagyu') {
+    rrect(x - r * 1.1, y - r * 0.75, r * 2.2, r * 1.5, r * 0.35);
+    ctx.fill();
+    // Marbling / grill sear marks
+    ctx.strokeStyle = topCook >= 0.72 ? '#5c2b09' : 'rgba(255,230,230,0.65)';
+    ctx.lineWidth = Math.max(1.5, r * 0.16);
+    ctx.beginPath();
+    ctx.moveTo(x - r * 0.6, y - r * 0.4); ctx.lineTo(x - r * 0.1, y + r * 0.4);
+    ctx.moveTo(x + r * 0.1, y - r * 0.4); ctx.lineTo(x + r * 0.6, y + r * 0.4);
+    ctx.stroke();
+  } else if (id === 'shrimp') {
+    ctx.beginPath();
+    ctx.arc(x, y, r * 0.85, 0.2, Math.PI * 1.45);
+    ctx.lineWidth = r * 0.68;
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = col;
+    ctx.stroke();
+  } else if (id === 'scallop') {
+    ctx.beginPath(); ctx.arc(x, y, r * 0.9, 0, TAU); ctx.fill();
+    ctx.strokeStyle = topCook >= 0.72 ? '#8c420c' : '#e6ccb2';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  } else {
+    // Lobster tail
+    ctx.beginPath(); ctx.ellipse(x, y, r * 1.15, r * 0.72, 0, 0, TAU); ctx.fill();
+    ctx.strokeStyle = '#ffd166';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+}
+
+function drawFoodItem(it, now) {
+  const ground = P(it.x, it.y, 0);
+  const pos = P(it.x, it.y, it.z);
+  const r = it.type.r * pos.s;
+
+  // Shadow on grill
+  ctx.fillStyle = 'rgba(0,0,0,0.42)';
+  const shScale = clamp(1 - it.z / 260, 0.45, 1);
+  ctx.beginPath();
+  ctx.ellipse(ground.x, ground.y + 4 * ground.s, r * 1.1 * shScale, r * 0.7 * shScale, 0, 0, TAU);
+  ctx.fill();
+
+  const topC = it.side === 0 ? it.c2 : it.c1;
+  const botC = it.side === 0 ? it.c1 : it.c2;
+
+  ctx.save();
+  ctx.translate(pos.x, pos.y);
+  if (it.flipA > 0) {
+    ctx.rotate(it.flipA * 0.35);
+    ctx.scale(1, Math.max(0.25, Math.abs(Math.cos(it.flipA))));
+  }
+  drawFoodIcon(it.type.id, 0, 0, r, topC, botC);
+  ctx.restore();
+
+  // Dual-Sided Sear Gauge Pill above food when resting on the grill!
+  if (!it.air && it.z < 5) {
+    const gy = pos.y - r * 1.25;
+    const pillColor = c => c > 1.22 ? '#ef476f' : c >= 0.72 ? '#ffd166' : c >= 0.55 ? '#06d6a0' : '#4cc9f0';
+    // Side 1 dot & Side 2 dot
+    for (let s = 0; s < 2; s++) {
+      const cVal = s === 0 ? it.c1 : it.c2;
+      const dx = (s === 0 ? -7 : 7) * pos.s;
+      ctx.fillStyle = pillColor(cVal);
+      ctx.beginPath(); ctx.arc(pos.x + dx, gy, 4.2 * pos.s, 0, TAU); ctx.fill();
+      ctx.strokeStyle = '#140705'; ctx.lineWidth = 1.2; ctx.stroke();
+    }
+    // Prompt when bottom side is golden or burning
+    if (botC >= 1.18 && Math.sin(now * 0.03) > 0) {
+      txt('BURNING!', pos.x, gy - 11 * pos.s, Math.max(9, 10 * pos.s), '#ef476f', 'center', 0, 900);
+    } else if (botC >= 0.72 && topC < 0.55) {
+      txt('FLIP!', pos.x, gy - 11 * pos.s, Math.max(9, 10 * pos.s), '#ffd166', 'center', 0, 900);
+    } else if (botC >= 0.72 && topC >= 0.72) {
+      txt('SERVE!', pos.x, gy - 11 * pos.s, Math.max(9, 10 * pos.s), '#06d6a0', 'center', 0, 900);
+    }
+  }
+}
+
+function drawSpatula() {
+  if (state !== STATES.PLAYING) return;
+  const sp = P(G.spatX, G.spatY, 6), u = sp.s;
+  ctx.save();
+  ctx.translate(sp.x, sp.y);
+  // Chrome spatula blade
+  ctx.fillStyle = 'rgba(206, 212, 218, 0.85)';
+  rrect(-16 * u, -18 * u, 32 * u, 26 * u, 4 * u);
+  ctx.fill();
+  // Wooden handle
+  ctx.fillStyle = '#5c2b16';
+  rrect(-5 * u, 8 * u, 10 * u, 28 * u, 3 * u);
+  ctx.fill();
+  ctx.restore();
+
+  // Aiming trajectory line when dragging upward to flick!
+  if (drag.item) {
+    const dx = drag.cx - drag.sx, dy = drag.cy - drag.sy;
+    if (dy < -18) {
+      const a = P(drag.item.x, drag.item.y, 8);
+      const b = P(drag.item.x + dx * 1.4, drag.item.y + dy * 1.4, 18);
+      ctx.save();
+      ctx.strokeStyle = '#06d6a0';
+      ctx.setLineDash([5 * S, 5 * S]);
+      ctx.lineWidth = 2.5 * S;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      ctx.restore();
+    }
+  }
+}
+
+function panel(x, y, w, h) {
+  rrect(x, y, w, h, 12);
+  ctx.fillStyle = 'rgba(24, 10, 8, 0.84)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255, 183, 3, 0.3)'; ctx.lineWidth = 1.5; ctx.stroke();
+}
+
+function drawHUD(now) {
+  const g = G, pad = 10, topY = safeTop + 8, ph = Math.min(52, W * 0.13);
+  const w1 = W * 0.31, w2 = W * 0.26, w3 = W * 0.28;
+
+  // Left: Score
+  panel(pad, topY, w1, ph);
+  txt('TIPS', pad + w1 * 0.5, topY + ph * 0.28, Math.min(10, W / 35), '#e6b89c', 'center', w1 - 10, 700);
+  txt(String(Math.floor(g.score)), pad + w1 * 0.5, topY + ph * 0.68, Math.min(22, W / 16), '#fff', 'center', w1 - 12, 900);
+
+  // Center: Multiplier & Served Count
+  const x2 = W * 0.5 - w2 * 0.5;
+  panel(x2, topY, w2, ph);
+  txt('x' + mult().toFixed(2).replace(/\.00$/, '.0'), W * 0.5, topY + ph * 0.35, Math.min(18, W / 19), g.flambeT > 0 ? '#06d6a0' : '#ffb703', 'center', w2 - 8, 900);
+  txt('SERVED ' + g.served, W * 0.5, topY + ph * 0.74, Math.min(10, W / 35), '#ffe6cc', 'center', w2 - 8, 700);
+
+  // Right: Chef Hats (Lives)
+  const x3 = W - pad - w3;
+  panel(x3, topY, w3, ph);
+  for (let i = 0; i < 3; i++) {
+    const hx = x3 + w3 * (0.22 + i * 0.28), hy = topY + ph * 0.5, r = Math.min(8, w3 / 12);
+    ctx.fillStyle = i < g.lives ? '#fff6ec' : 'rgba(255,255,255,0.16)';
+    ctx.beginPath(); ctx.arc(hx, hy, r, 0, TAU); ctx.fill();
+  }
+
+  // Bottom Flambé Gauge Bar
+  const by = H - 24, bw = Math.min(260, W * 0.68), bx = W * 0.5 - bw * 0.5;
+  rrect(bx, by, bw, 8, 4);
+  ctx.fillStyle = 'rgba(255,255,255,0.14)'; ctx.fill();
+  const fill = g.flambeT > 0 ? g.flambeT / 7.0 : g.flambe / 100;
+  rrect(bx, by, Math.max(6, bw * fill), 8, 4);
+  ctx.fillStyle = g.flambeT > 0 ? '#06d6a0' : '#ffb703'; ctx.fill();
+  txt(g.flambeT > 0 ? '★ HIBACHI FLAMBÉ (2X) ★' : 'FLAMBÉ METER', W * 0.5, by - 10, 10, '#ffd166', 'center', bw, 800);
+
+  // Onboarding Hint
+  if (state === STATES.PLAYING && g.hint > 0) {
+    ctx.globalAlpha = clamp(g.hint, 0, 1);
+    const hw = Math.min(330, W * 0.9), hy = H - 68;
+    panel(W * 0.5 - hw * 0.5, hy - 24, hw, 48);
+    txt('TAP food to flip • FLICK UP to serve guests!', W * 0.5, hy - 7, Math.min(13, W / 25), '#fff', 'center', hw - 16, 900);
+    txt('Sear both dots golden for 2.5x points • Don’t burn!', W * 0.5, hy + 11, Math.min(11, W / 32), '#ffb703', 'center', hw - 16, 600);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawStart(now) {
+  ctx.fillStyle = 'rgba(20, 8, 6, 0.62)'; ctx.fillRect(0, 0, W, H);
+  const b = Math.min(54, W / 7);
+  txt('TEPPAN TOSS', W * 0.5, safeTop + H * 0.16, b, '#ffb703', 'center', W - 28, 900);
+  txt('Sear both sides golden. Flick to the hungry guests!', W * 0.5, safeTop + H * 0.16 + b * 0.85, Math.min(15, W / 23), '#fff6ec', 'center', W - 28, 600);
+  ctx.globalAlpha = 0.65 + 0.35 * Math.sin(now * 0.006);
+  txt('TAP TO COOK', W * 0.5, H * 0.7, Math.min(28, W / 12), '#06d6a0', 'center', W - 28, 900);
+  ctx.globalAlpha = 1;
+  if (top5[0]) txt('BEST ' + top5[0] + '  •  SERVED ' + bestServed + '  •  STREAK ' + bestStreak, W * 0.5, H * 0.7 + 36, Math.min(14, W / 25), '#ffb703', 'center', W - 28, 700);
+}
+
+function drawOver(now) {
+  ctx.fillStyle = 'rgba(20, 8, 6, 0.82)'; ctx.fillRect(0, 0, W, H);
+  const pw = Math.min(W - 24, 360), ph = Math.min(H - safeTop - 24, 350);
+  const x = W * 0.5 - pw * 0.5, y = Math.max(safeTop + 10, (H - ph) * 0.5), k = ph / 350;
+  panel(x, y, pw, ph);
+  txt(G.reason || 'KITCHEN CLOSED', W * 0.5, y + 30 * k, Math.min(22, pw / 12), '#ef476f', 'center', pw - 24, 900);
+  txt(String(Math.floor(G.score)), W * 0.5, y + 72 * k, Math.min(44, pw / 6.5), '#fff', 'center', pw - 24, 900);
+  txt(G.hiNew ? 'NEW HIGH SCORE!' : 'Dishes Served: ' + G.served + '  •  Best Streak: ' + G.maxStreak, W * 0.5, y + 108 * k, Math.min(14, pw / 20), G.hiNew ? '#ffb703' : '#ffe6cc', 'center', pw - 24, 800);
+  txt('TOP 5 MASTER CHEFS', W * 0.5, y + 136 * k, 12, '#e6b89c', 'center', pw - 24, 700);
+
+  for (let i = 0; i < 5; i++) {
+    const yy = y + (160 + i * 23) * k, sc = top5[i], me = i === G.rank;
+    if (me) { rrect(x + 16, yy - 10 * k, pw - 32, 20 * k, 6); ctx.fillStyle = 'rgba(255,183,3,0.22)'; ctx.fill(); }
+    txt((i + 1) + '.', x + 28, yy, 14, me ? '#ffb703' : '#e6b89c', 'left', 30, 800);
+    txt(sc === undefined ? '-' : String(sc), x + pw - 28, yy, 14, me ? '#ffb703' : '#fff6ec', 'right', pw - 80, 800);
+  }
+  if (performance.now() - overAt > 800) {
+    ctx.globalAlpha = 0.65 + 0.35 * Math.sin(now * 0.007);
+    txt('TAP TO COOK AGAIN', W * 0.5, y + ph - 26 * k, Math.min(20, pw / 15), '#06d6a0', 'center', pw - 24, 900);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function draw(now) {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  if (G.shake > 0.3) ctx.translate(rr(-1, 1) * G.shake, rr(-1, 1) * G.shake);
+
+  drawGrillAndCounter(now);
+  drawGuests(now);
+
+  // Depth sort food back-to-front by Y
+  const sorted = G.items.slice().sort((a, b) => a.y - b.y);
+  for (const it of sorted) drawFoodItem(it, now);
+
+  drawSpatula();
+
+  for (const p of G.parts) {
+    ctx.globalAlpha = clamp(p.l / p.m, 0, 1);
+    ctx.fillStyle = p.c;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  for (const p of G.pops) {
+    ctx.globalAlpha = clamp(p.l * 1.4, 0, 1);
+    txt(p.t, clamp(p.x, 75, W - 75), p.y, p.sz, p.col, 'center', W - 20, 900);
+  }
+  ctx.globalAlpha = 1;
+  if (G.flash > 0) {
+    ctx.fillStyle = `rgba(239, 71, 111, ${G.flash * 0.38})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+  ctx.restore();
+
+  if (state === STATES.START) drawStart(now);
+  else {
+    drawHUD(now);
+    if (state === STATES.GAMEOVER) drawOver(now);
+  }
+}
+
+resize();
+resetGame();
+startLoop();
+})();
+</script>
+</body>
+</html>

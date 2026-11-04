@@ -1,0 +1,980 @@
+<!-- FILE: anvil-strike.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Anvil Strike</title>
+<style>
+:root{--bg:#120806;--fg:#fff4e6;--accent:#ffb703;--hot:#ff4d00;--cold:#38d9a9}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#120806;--fg:#fff4e6}}
+:root[data-theme="dark"]{--bg:#120806;--fg:#fff4e6}
+html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;overscroll-behavior:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+canvas{position:fixed;inset:0;display:block;touch-action:none}
+#probe{position:fixed;top:0;left:0;visibility:hidden;padding-top:env(safe-area-inset-top,0px)}
+</style>
+</head>
+<body>
+<div id="probe"></div>
+<canvas id="c"></canvas>
+<script>
+(() => {
+'use strict';
+const STATES = { START: 0, PLAYING: 1, QUENCH: 2, GAMEOVER: 3 };
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), probe = document.getElementById('probe');
+const TAU = Math.PI * 2, NODES = 16;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const rr = (a, b) => a + Math.random() * (b - a);
+
+/* ---------- storage ---------- */
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+};
+const loadTop = () => {
+  try {
+    const a = JSON.parse(store.get('anvilstrike.top5') || '[]');
+    return Array.isArray(a) ? a.filter(n => typeof n === 'number' && isFinite(n)).slice(0, 5) : [];
+  } catch (e) { return []; }
+};
+let top5 = loadTop();
+let bestSwords = parseInt(store.get('anvilstrike.swords') || '0', 10) || 0;
+let bestStreak = parseInt(store.get('anvilstrike.streak') || '0', 10) || 0;
+function saveScore(s, sw, st) {
+  const sc = Math.floor(s);
+  const a = top5.slice(); a.push(sc); a.sort((x, y) => y - x); top5 = a.slice(0, 5);
+  store.set('anvilstrike.top5', JSON.stringify(top5));
+  if (sw > bestSwords) { bestSwords = sw; store.set('anvilstrike.swords', String(bestSwords)); }
+  if (st > bestStreak) { bestStreak = st; store.set('anvilstrike.streak', String(bestStreak)); }
+  return sc > 0 ? top5.indexOf(sc) : -1;
+}
+
+/* ---------- canvas & layout ---------- */
+let W = 0, H = 0, dpr = 1, safeTop = 0, S = 1, ax = 0, ay = 0, bladeLen = 0;
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 3);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  safeTop = probe.offsetHeight || 0;
+  S = Math.min(W / 400, (H - safeTop) / 700);
+  ax = W * 0.5;
+  ay = Math.max(safeTop + 330 * S, H * 0.57);
+  bladeLen = Math.min(W * 0.72, 290 * S);
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 120));
+
+/* ---------- audio engine ---------- */
+let AC = null, noiseBuf = null;
+function audio() {
+  if (!AC) {
+    try {
+      const C = window.AudioContext || window.webkitAudioContext;
+      if (C) {
+        AC = new C();
+        noiseBuf = AC.createBuffer(1, AC.sampleRate, AC.sampleRate);
+        const d = noiseBuf.getChannelData(0);
+        for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+      }
+    } catch (e) { AC = null; }
+  }
+  if (AC && AC.state === 'suspended') AC.resume();
+  return AC;
+}
+function tone(type, f0, f1, dur, vol, delay) {
+  const a = audio(); if (!a) return;
+  try {
+    const o = a.createOscillator(), g = a.createGain(), t = a.currentTime + (delay || 0);
+    o.type = type; o.frequency.setValueAtTime(f0, t);
+    o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(a.destination);
+    o.start(t); o.stop(t + dur + 0.03);
+  } catch (e) {}
+}
+function noise(dur, vol, freq, type = 'bandpass') {
+  const a = audio(); if (!a || !noiseBuf) return;
+  try {
+    const s = a.createBufferSource(), f = a.createBiquadFilter(), g = a.createGain(), t = a.currentTime;
+    s.buffer = noiseBuf; f.type = type; f.frequency.value = freq;
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    s.connect(f); f.connect(g); g.connect(a.destination);
+    s.start(t); s.stop(t + dur + 0.02);
+  } catch (e) {}
+}
+const sfx = {
+  ring(combo, perf) {
+    const base = (perf ? 740 : 560) * Math.pow(1.055, Math.min(combo, 14));
+    tone('triangle', base, base * 0.99, perf ? 0.45 : 0.26, perf ? 0.22 : 0.14);
+    tone('sine', base * 2.42, base * 2.4, perf ? 0.55 : 0.3, perf ? 0.14 : 0.07);
+    tone('square', 140, 48, 0.09, 0.18);
+  },
+  slag() {
+    noise(0.18, 0.24, 1400, 'bandpass');
+    tone('sawtooth', 320, 110, 0.16, 0.14);
+  },
+  crack() {
+    noise(0.42, 0.35, 650, 'lowpass');
+    tone('sawtooth', 160, 32, 0.45, 0.26);
+    tone('square', 95, 25, 0.4, 0.18);
+  },
+  bellows() {
+    noise(0.38, 0.22, 420, 'lowpass');
+    tone('sine', 120, 260, 0.32, 0.1);
+  },
+  quench() {
+    noise(0.95, 0.28, 2400, 'highpass');
+    [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => tone('triangle', f, f * 1.02, 0.24, 0.12, i * 0.08));
+  },
+  start() { tone('triangle', 330, 660, 0.15, 0.12); },
+  over() { tone('sawtooth', 340, 38, 0.85, 0.16); }
+};
+
+/* ---------- sword blueprints ---------- */
+const WEAPONS = [
+  { name: 'IRON DAGGER', fn: u => 0.36 + 0.38 * Math.sin(u * Math.PI) * (1 - 0.55 * u) },
+  { name: 'KNIGHT LONGSWORD', fn: u => 0.58 * (1 - 0.62 * Math.pow(u, 1.35)) + 0.08 * Math.sin(u * Math.PI * 2) },
+  { name: 'LEAF GLADIUS', fn: u => 0.44 + 0.32 * Math.sin(u * Math.PI * 1.85 - 0.3) * (1 - 0.35 * u) },
+  { name: 'ROYAL CLAYMORE', fn: u => 0.68 * (1 - 0.52 * u) + 0.12 * Math.cos(u * Math.PI * 3) * (1 - u) },
+  { name: 'FLAME KRISS', fn: u => (0.55 - 0.32 * u) + 0.16 * Math.sin(u * Math.PI * 4.5) * (1 - 0.3 * u) },
+  { name: 'DRAGON CLEAVER', fn: u => 0.38 + 0.52 * Math.pow(Math.sin(u * Math.PI * 0.88), 0.7) }
+];
+
+/* ---------- state ---------- */
+let state = STATES.START, G = null, raf = 0, last = 0, overAt = 0;
+const embers = Array.from({ length: 38 }, () => ({ x: Math.random(), y: Math.random(), r: rr(1, 3), vy: rr(0.05, 0.16), vx: rr(-0.03, 0.03), a: rr(0.3, 0.9) }));
+const ptr = { id: null, down: false, x: 0, y: 0 };
+const keys = { l: 0, r: 0 };
+
+function makeSword(lv) {
+  const spec = WEAPONS[lv % WEAPONS.length];
+  const target = [], nodes = [], slag = [];
+  for (let i = 0; i < NODES; i++) {
+    const u = i / (NODES - 1);
+    const tw = clamp(spec.fn(u), 0.16, 0.92);
+    target.push(tw);
+    const raw = clamp(tw + rr(0.24, 0.42) + 0.04 * Math.sin(i * 1.7), tw + 0.18, 1.18);
+    nodes.push(raw);
+    slag.push(lv >= 1 && i > 1 && i < NODES - 2 && Math.random() < Math.min(0.38, 0.12 + lv * 0.04) ? 1 : 0);
+  }
+  G.wName = spec.name;
+  G.target = target;
+  G.nodes = nodes;
+  G.slag = slag;
+  G.temp = 0.72;
+  G.quenchT = 0;
+  G.steam = [];
+  pickSpot();
+}
+
+function pickSpot() {
+  const g = G;
+  const cands = [];
+  for (let i = 0; i < NODES; i++) {
+    if (g.nodes[i] - g.target[i] > 0.035) cands.push(i);
+  }
+  if (!cands.length) {
+    completeSword();
+    return;
+  }
+  cands.sort((a, b) => (g.nodes[b] - g.target[b]) - (g.nodes[a] - g.target[a]));
+  const topN = Math.min(cands.length, 4);
+  g.spot = cands[Math.floor(Math.random() * topN)];
+  g.ring = 1.0;
+}
+
+function resetGame() {
+  G = {
+    level: 0, score: 0, lives: 3, streak: 0, maxStreak: 0, swords: 0,
+    wName: '', target: [], nodes: [], slag: [], spot: 7, ring: 1.0,
+    temp: 0.72, bellowsCd: 0, bellowsAnim: 0,
+    hx: 0.5, tx: 0.5, hDown: 0, hCharge: 0,
+    parts: [], pops: [], cracks: [], steam: [],
+    shake: 0, flash: 0, hint: 1, strikes: 0, rank: -1, hiNew: false, reason: '', saved: false
+  };
+  makeSword(0);
+}
+
+/* ---------- loop control ---------- */
+function stopLoop() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+function startLoop() { stopLoop(); last = performance.now(); raf = requestAnimationFrame(frame); }
+function frame(now) {
+  raf = requestAnimationFrame(frame);
+  const dt = Math.min(0.033, Math.max(0.001, (now - last) / 1000));
+  last = now;
+  update(dt);
+  draw(now);
+}
+document.addEventListener('visibilitychange', () => {
+  ptr.down = false; ptr.id = null; keys.l = keys.r = 0;
+  document.hidden ? stopLoop() : startLoop();
+});
+window.addEventListener('blur', () => { ptr.down = false; ptr.id = null; keys.l = keys.r = 0; });
+
+function startGame() {
+  stopLoop();
+  ptr.down = false; ptr.id = null; keys.l = keys.r = 0;
+  resetGame();
+  state = STATES.PLAYING;
+  sfx.start();
+  startLoop();
+}
+
+/* ---------- helpers & juice ---------- */
+const mult = () => Math.min(8, 1 + Math.floor(G.streak / 2) * 0.5);
+function pop(t, col, x, y, sz = 20) { G.pops.push({ t, col, x, y, sz, l: 1.05 }); }
+function spark(x, y, n, cols, sp = 240, up = 120) {
+  for (let i = 0; i < n && G.parts.length < 280; i++) {
+    const a = rr(-Math.PI * 0.95, -Math.PI * 0.05) + rr(-0.4, 0.4);
+    const v = sp * rr(0.35, 1.15);
+    G.parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - up * Math.random(), l: rr(0.35, 0.85), m: 0.85, c: cols[i % cols.length], r: rr(2, 4.5) });
+  }
+}
+const nodeX = i => (ax - bladeLen * 0.48) + (i / (NODES - 1)) * (bladeLen * 0.96);
+
+function pumpBellows() {
+  const g = G;
+  if (state !== STATES.PLAYING || g.bellowsCd > 0) return;
+  g.bellowsCd = 0.65;
+  g.bellowsAnim = 1;
+  g.temp = clamp(g.temp + 0.28, 0, 1);
+  sfx.bellows();
+  const bx = bellowGeo().x, by = bellowGeo().y;
+  spark(bx, by - 20 * S, 18, ['#ff922b', '#ffd43b', '#ff4d00'], 190, 160);
+  if (g.temp > 0.93) {
+    pop('OVERHEATED!', '#ff6b6b', ax, ay - 95 * S, 22);
+  } else {
+    pop('HEAT +', '#ff922b', bx, by - 36 * S, 18);
+  }
+}
+
+function hurt(why, x, y) {
+  const g = G;
+  g.lives--;
+  g.streak = 0;
+  g.shake = 15;
+  g.flash = 0.65;
+  G.cracks.push({ x: x || ax, y: y || ay - 28 * S, a: rr(0, TAU) });
+  sfx.crack();
+  spark(x || ax, y || ay - 28 * S, 26, ['#ff4d00', '#ff8787', '#ffffff'], 280, 140);
+  pop(why, '#ff6b6b', clamp(x || ax, 75, W - 75), (y || ay) - 65 * S, 22);
+  if (g.lives <= 0) {
+    g.reason = why;
+    endGame();
+  }
+}
+
+function endGame() {
+  if (G.saved) return;
+  G.saved = true;
+  state = STATES.GAMEOVER;
+  overAt = performance.now();
+  const prior = top5[0] || 0;
+  G.rank = saveScore(G.score, G.swords, G.maxStreak);
+  G.hiNew = G.score > prior && G.score > 0;
+  sfx.over();
+}
+
+function completeSword() {
+  const g = G;
+  g.swords++;
+  let err = 0;
+  for (let i = 0; i < NODES; i++) err += Math.abs(g.nodes[i] - g.target[i]);
+  const acc = clamp(1 - err / (NODES * 0.22), 0.5, 1);
+  const bonus = Math.round((300 + g.level * 120) * acc * mult());
+  g.score += bonus;
+  g.quenchBonus = bonus;
+  g.quenchAcc = Math.round(acc * 100);
+  state = STATES.QUENCH;
+  g.quenchT = 2.1;
+  sfx.quench();
+  for (let i = 0; i < 42; i++) {
+    g.steam.push({ x: ax + rr(-bladeLen * 0.45, bladeLen * 0.45), y: ay - 25 * S, vx: rr(-35, 35), vy: rr(-140, -50), r: rr(10, 26) * S, l: rr(0.6, 1.4) });
+  }
+  pop('BLADE QUENCHED! +' + bonus, '#7df0ff', ax, ay - 110 * S, 24);
+}
+
+function strikeHammer() {
+  const g = G;
+  if (state !== STATES.PLAYING) return;
+  g.hDown = 1.0;
+  g.strikes++;
+  if (g.strikes >= 2) g.hint = Math.min(g.hint, 0.99);
+
+  const idx = clamp(Math.round(g.hx * (NODES - 1)), 0, NODES - 1);
+  const sx = nodeX(idx), sy = ay - 28 * S;
+
+  // Temperature check: Cold (<0.22) or Overheated (>0.92)
+  if (g.temp < 0.22) {
+    hurt('COLD STEEL CRACKED!', sx, sy);
+    return;
+  }
+  if (g.temp > 0.92) {
+    hurt('OVERHEATED MELT!', sx, sy);
+    return;
+  }
+
+  // Slag scale armor check: requires heavy blow (hCharge >= 0.35)
+  if (g.slag[idx]) {
+    if (g.hCharge >= 0.32) {
+      g.slag[idx] = 0;
+      const pts = Math.round(90 * mult());
+      g.score += pts;
+      g.shake = 10;
+      sfx.slag();
+      spark(sx, sy, 22, ['#ffd43b', '#ff922b', '#adb5bd'], 260, 150);
+      pop('SLAG SHATTERED! +' + pts, '#ffd43b', sx, sy - 42 * S, 20);
+    } else {
+      g.streak = 0;
+      g.shake = 6;
+      sfx.slag();
+      pop('HOLD FOR HEAVY BLOW!', '#ffa94d', sx, sy - 42 * S, 18);
+      return;
+    }
+  }
+
+  // Distance to active sweet spot & timing ring window
+  const distNodes = Math.abs(idx - g.spot);
+  const isSpot = distNodes <= 1;
+  const ringGood = g.ring >= 0.16 && g.ring <= 0.56;
+  const isPerf = distNodes === 0 && g.ring >= 0.22 && g.ring <= 0.44 && g.temp >= 0.32 && g.temp <= 0.85;
+
+  // Shape the metal at idx and neighbors
+  const power = (isSpot ? 0.22 : 0.12) * (1 + g.hCharge * 0.55) * (isPerf ? 1.35 : 1);
+  for (let d = -2; d <= 2; d++) {
+    const k = idx + d;
+    if (k < 0 || k >= NODES || g.slag[k]) continue;
+    const fall = d === 0 ? 1 : Math.abs(d) === 1 ? 0.58 : 0.22;
+    const cur = g.nodes[k], tgt = g.target[k];
+    if (cur > tgt) {
+      g.nodes[k] = Math.max(tgt, cur - power * fall);
+    } else if (d === 0 && !isSpot) {
+      // Striking an already-thin section thins it too far!
+      g.nodes[k] -= 0.08;
+      if (g.nodes[k] < tgt - 0.11) {
+        hurt('BLADE SHATTERED!', sx, sy);
+        return;
+      }
+    }
+  }
+
+  if (isSpot && ringGood) {
+    g.streak++;
+    g.maxStreak = Math.max(g.maxStreak, g.streak);
+    const pts = Math.round((isPerf ? 120 : 65) * mult() * (1 + g.hCharge * 0.4));
+    g.score += pts;
+    g.temp = clamp(g.temp + 0.04, 0, 1); // Kinetic friction heat
+    g.shake = isPerf ? 11 : 6;
+    sfx.ring(g.streak, isPerf);
+    spark(sx, sy, isPerf ? 28 : 14, isPerf ? ['#fff9db', '#ffd43b', '#ff922b'] : ['#ffd43b', '#ff6b35'], isPerf ? 300 : 200, 150);
+    pop((isPerf ? 'MASTER STRIKE! +' : 'GOOD +') + pts, isPerf ? '#ffe066' : '#fff4e6', sx, sy - 38 * S, isPerf ? 23 : 19);
+    pickSpot();
+  } else {
+    g.streak = 0;
+    const pts = 15;
+    g.score += pts;
+    g.shake = 4;
+    sfx.ring(0, false);
+    spark(sx, sy, 8, ['#ff922b', '#ffd43b'], 150, 90);
+    pop(isSpot ? 'EARLY / LATE' : 'OFF TARGET', '#adb5bd', sx, sy - 34 * S, 16);
+    if (g.nodes[g.spot] - g.target[g.spot] <= 0.035) pickSpot();
+  }
+}
+
+/* ---------- update ---------- */
+function update(dt) {
+  const g = G;
+  g.shake *= Math.exp(-8 * dt);
+  g.flash = Math.max(0, g.flash - dt * 2.5);
+  g.hDown = Math.max(0, g.hDown - dt * 6.5);
+  g.bellowsCd = Math.max(0, g.bellowsCd - dt);
+  g.bellowsAnim = Math.max(0, g.bellowsAnim - dt * 3.2);
+
+  for (const e of embers) {
+    e.y -= e.vy * dt;
+    e.x += e.vx * dt;
+    if (e.y < -0.05) { e.y = 1.05; e.x = Math.random(); }
+  }
+  for (let i = g.parts.length - 1; i >= 0; i--) {
+    const p = g.parts[i]; p.l -= dt;
+    if (p.l <= 0) { g.parts.splice(i, 1); continue; }
+    p.vy += 620 * dt; p.x += p.vx * dt; p.y += p.vy * dt;
+  }
+  for (let i = g.pops.length - 1; i >= 0; i--) {
+    const p = g.pops[i]; p.l -= dt;
+    if (p.l <= 0) g.pops.splice(i, 1); else p.y -= 32 * dt;
+  }
+  for (let i = g.steam.length - 1; i >= 0; i--) {
+    const s = g.steam[i]; s.l -= dt;
+    if (s.l <= 0) g.steam.splice(i, 1);
+    else { s.x += s.vx * dt; s.y += s.vy * dt; s.r += 14 * S * dt; }
+  }
+
+  if (state === STATES.START || state === STATES.GAMEOVER) return;
+
+  if (state === STATES.QUENCH) {
+    g.quenchT -= dt;
+    if (g.quenchT <= 0) {
+      g.level++;
+      g.cracks = [];
+      makeSword(g.level);
+      state = STATES.PLAYING;
+    }
+    return;
+  }
+
+  // Non-linear difficulty ramp based on score & level
+  const diff = 1 - Math.exp(-(g.score + g.level * 600) / 4500);
+  if (g.hint < 1) g.hint = Math.max(0, g.hint - dt * 1.5);
+
+  // Keyboard steering
+  const kx = keys.r - keys.l;
+  if (kx) g.tx = clamp(g.tx + kx * dt * 1.35, 0, 1);
+  g.hx += (g.tx - g.hx) * (1 - Math.exp(-16 * dt));
+
+  if (ptr.down) {
+    g.hCharge = clamp(g.hCharge + dt * 1.8, 0, 1);
+  }
+
+  // Temperature cooling curve
+  const coolRate = lerp(0.055, 0.125, diff);
+  g.temp = clamp(g.temp - coolRate * dt, 0, 1);
+
+  // Sweet-spot ring contraction
+  const ringSpd = lerp(0.68, 1.45, diff);
+  g.ring -= ringSpd * dt;
+  if (g.ring <= 0) {
+    // Missed the timing cycle
+    g.streak = 0;
+    pickSpot();
+  }
+
+  // Check if entire sword is shaped within tolerance
+  let rem = 0;
+  for (let i = 0; i < NODES; i++) {
+    if (g.nodes[i] - g.target[i] > 0.035) rem++;
+  }
+  if (rem === 0) completeSword();
+}
+
+/* ---------- UI buttons & input ---------- */
+function bellowGeo() {
+  const R = clamp(36 * S, 26, 44);
+  return { x: W - R - 18, y: Math.min(H - R - 18, ay + 125 * S), R };
+}
+function inBellows(x, y) {
+  const b = bellowGeo();
+  return Math.hypot(x - b.x, y - b.y) <= b.R + 12;
+}
+function setAim(clientX) {
+  const x0 = ax - bladeLen * 0.48, w = bladeLen * 0.96;
+  G.tx = clamp((clientX - x0) / Math.max(1, w), 0, 1);
+}
+
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault(); audio();
+  try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+  if (state === STATES.START) { startGame(); return; }
+  if (state === STATES.GAMEOVER) { if (performance.now() - overAt > 800) startGame(); return; }
+  if (state !== STATES.PLAYING) return;
+
+  if (inBellows(e.clientX, e.clientY)) {
+    pumpBellows();
+    return;
+  }
+  if (ptr.id === null) {
+    ptr.id = e.pointerId;
+    ptr.down = true;
+    G.hCharge = 0;
+    setAim(e.clientX);
+  }
+});
+
+cv.addEventListener('pointermove', e => {
+  if (state !== STATES.PLAYING) return;
+  if (e.pointerId === ptr.id || (e.pointerType === 'mouse' && !inBellows(e.clientX, e.clientY))) {
+    setAim(e.clientX);
+  }
+});
+
+function onUp(e) {
+  if (e.pointerId === ptr.id) {
+    ptr.id = null;
+    ptr.down = false;
+    if (state === STATES.PLAYING) strikeHammer();
+    G.hCharge = 0;
+  }
+}
+cv.addEventListener('pointerup', onUp);
+cv.addEventListener('pointercancel', e => { if (e.pointerId === ptr.id) { ptr.id = null; ptr.down = false; G.hCharge = 0; } });
+cv.addEventListener('contextmenu', e => e.preventDefault());
+
+window.addEventListener('keydown', e => {
+  const c = e.code;
+  if (c === 'ArrowLeft' || c === 'KeyA') { keys.l = 1; e.preventDefault(); }
+  else if (c === 'ArrowRight' || c === 'KeyD') { keys.r = 1; e.preventDefault(); }
+  else if (c === 'KeyB' || c === 'KeyW' || c === 'ArrowUp') { e.preventDefault(); audio(); pumpBellows(); }
+  else if (c === 'Space' || c === 'Enter' || c === 'ArrowDown' || c === 'KeyS') {
+    e.preventDefault(); audio();
+    if (e.repeat) return;
+    if (state === STATES.START) startGame();
+    else if (state === STATES.GAMEOVER && performance.now() - overAt > 800) startGame();
+    else if (state === STATES.PLAYING) { ptr.down = true; G.hCharge = 0; }
+  }
+});
+window.addEventListener('keyup', e => {
+  const c = e.code;
+  if (c === 'ArrowLeft' || c === 'KeyA') keys.l = 0;
+  else if (c === 'ArrowRight' || c === 'KeyD') keys.r = 0;
+  else if ((c === 'Space' || c === 'Enter' || c === 'ArrowDown' || c === 'KeyS') && ptr.down) {
+    ptr.down = false;
+    strikeHammer();
+    G.hCharge = 0;
+  }
+});
+
+/* ---------- rendering ---------- */
+function rrect(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function txt(s, x, y, sz, col, align = 'center', maxW = 0, weight = 800) {
+  let f = sz;
+  ctx.font = weight + ' ' + f + 'px system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
+  if (maxW > 0) {
+    while (f > 9 && ctx.measureText(s).width > maxW) {
+      f--;
+      ctx.font = weight + ' ' + f + 'px system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
+    }
+  }
+  ctx.fillStyle = col; ctx.textAlign = align; ctx.textBaseline = 'middle';
+  ctx.fillText(s, x, y);
+}
+
+function heatColors(temp) {
+  if (state === STATES.QUENCH) return ['#d0ebff', '#74c0fc', '#339af0'];
+  if (temp < 0.22) return ['#6c757d', '#495057', '#2b3035']; // Cold iron
+  if (temp < 0.55) return ['#ff6b35', '#d9381e', '#69140e']; // Cherry red
+  if (temp < 0.88) return ['#fff3b0', '#ff922b', '#c92a2a']; // Forging orange-gold
+  return ['#ffffff', '#fff9db', '#ffd43b']; // White-hot danger
+}
+
+function drawBackground(now) {
+  const g = G;
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#0d0504');
+  bg.addColorStop(0.55, '#1d0b07');
+  bg.addColorStop(1, '#100604');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+  // Glowing forge hearth arch in background
+  const fx = W * 0.5, fy = ay - 145 * S, fr = Math.min(W * 0.42, 165 * S);
+  const glowIntensity = 0.35 + g.temp * 0.45 + 0.06 * Math.sin(now * 0.006);
+  const fg = ctx.createRadialGradient(fx, fy, fr * 0.1, fx, fy, fr * 1.6);
+  fg.addColorStop(0, `rgba(255,140,40,${glowIntensity})`);
+  fg.addColorStop(0.5, `rgba(210,45,10,${glowIntensity * 0.5})`);
+  fg.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = fg; ctx.fillRect(0, 0, W, H);
+
+  // Hearth brickwork silhouette
+  ctx.fillStyle = '#160907';
+  ctx.beginPath();
+  ctx.arc(fx, fy, fr * 0.72, Math.PI, 0);
+  ctx.lineTo(fx + fr * 0.72, ay);
+  ctx.lineTo(fx - fr * 0.72, ay);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,120,50,0.22)';
+  ctx.lineWidth = 3 * S;
+  ctx.stroke();
+
+  // Rising forge embers
+  for (const e of embers) {
+    ctx.globalAlpha = e.a * (0.4 + 0.6 * g.temp);
+    ctx.fillStyle = e.r > 2 ? '#ffd43b' : '#ff6b35';
+    ctx.beginPath(); ctx.arc(e.x * W, e.y * H, e.r * S, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawAnvil() {
+  const aw = bladeLen * 1.12, ah = 86 * S;
+  const topY = ay;
+
+  // Anvil shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.beginPath();
+  ctx.ellipse(ax, topY + ah + 32 * S, aw * 0.62, 18 * S, 0, 0, TAU);
+  ctx.fill();
+
+  // Wooden block base
+  const wg = ctx.createLinearGradient(ax - aw * 0.45, topY + ah * 0.7, ax + aw * 0.45, topY + ah * 0.7);
+  wg.addColorStop(0, '#2b160c'); wg.addColorStop(0.4, '#4d2815'); wg.addColorStop(1, '#1f0f08');
+  ctx.fillStyle = wg;
+  rrect(ax - aw * 0.44, topY + ah * 0.68, aw * 0.88, 52 * S, 6 * S);
+  ctx.fill();
+
+  // Iron bands on wood block
+  ctx.fillStyle = '#2b303a';
+  ctx.fillRect(ax - aw * 0.44, topY + ah * 0.76, aw * 0.88, 6 * S);
+
+  // Heavy cast-iron anvil body & horn
+  const ig = ctx.createLinearGradient(ax - aw * 0.6, topY, ax + aw * 0.6, topY + ah);
+  ig.addColorStop(0, '#495057'); ig.addColorStop(0.35, '#6c757d'); ig.addColorStop(0.7, '#343a40'); ig.addColorStop(1, '#1b1e21');
+  ctx.fillStyle = ig;
+  ctx.beginPath();
+  // Left horn
+  ctx.moveTo(ax - aw * 0.48, topY);
+  ctx.quadraticCurveTo(ax - aw * 0.72, topY + 6 * S, ax - aw * 0.76, topY + 18 * S);
+  ctx.quadraticCurveTo(ax - aw * 0.55, topY + 34 * S, ax - aw * 0.36, topY + 36 * S);
+  // Waist curve
+  ctx.lineTo(ax - aw * 0.28, topY + ah * 0.68);
+  ctx.lineTo(ax + aw * 0.32, topY + ah * 0.68);
+  ctx.lineTo(ax + aw * 0.42, topY + 32 * S);
+  // Right heel
+  ctx.lineTo(ax + aw * 0.58, topY + 28 * S);
+  ctx.lineTo(ax + aw * 0.58, topY);
+  ctx.closePath();
+  ctx.fill();
+
+  // Top 3D extruded face of the anvil
+  const fg = ctx.createLinearGradient(0, topY - 16 * S, 0, topY + 4 * S);
+  fg.addColorStop(0, '#868e96'); fg.addColorStop(0.5, '#adb5bd'); fg.addColorStop(1, '#495057');
+  ctx.fillStyle = fg;
+  ctx.beginPath();
+  ctx.moveTo(ax - aw * 0.46, topY - 14 * S);
+  ctx.lineTo(ax + aw * 0.54, topY - 14 * S);
+  ctx.lineTo(ax + aw * 0.58, topY);
+  ctx.lineTo(ax - aw * 0.48, topY);
+  ctx.closePath();
+  ctx.fill();
+
+  // Specular rim highlight
+  ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+  ctx.lineWidth = 1.5 * S;
+  ctx.beginPath();
+  ctx.moveTo(ax - aw * 0.48, topY);
+  ctx.lineTo(ax + aw * 0.58, topY);
+  ctx.stroke();
+}
+
+function drawSword(now) {
+  const g = G, cy = ay - 28 * S, maxHalf = 36 * S;
+  const x0 = ax - bladeLen * 0.48;
+
+  // Hilt & Brass Crossguard on the left
+  const gx = x0 - 8 * S;
+  ctx.fillStyle = '#5c2b16';
+  rrect(gx - 46 * S, cy - 7 * S, 42 * S, 14 * S, 5 * S);
+  ctx.fill();
+  ctx.fillStyle = '#fcc419';
+  ctx.beginPath(); ctx.arc(gx - 48 * S, cy, 10 * S, 0, TAU); ctx.fill();
+  rrect(gx - 8 * S, cy - 28 * S, 11 * S, 56 * S, 4 * S);
+  ctx.fill();
+
+  // 3D Extruded Bottom Edge of Heated Blade
+  const cols = heatColors(g.temp);
+  ctx.fillStyle = cols[2];
+  ctx.beginPath();
+  for (let i = 0; i < NODES; i++) {
+    const x = nodeX(i), y = cy - g.nodes[i] * maxHalf;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.lineTo(nodeX(NODES - 1) + 14 * S, cy + 6 * S);
+  for (let i = NODES - 1; i >= 0; i--) {
+    const x = nodeX(i), y = cy + g.nodes[i] * maxHalf + 7 * S;
+    ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.fill();
+
+  // Main Glowing Blade Face
+  const bg = ctx.createLinearGradient(0, cy - maxHalf, 0, cy + maxHalf);
+  bg.addColorStop(0, cols[1]);
+  bg.addColorStop(0.5, cols[0]);
+  bg.addColorStop(1, cols[1]);
+  ctx.fillStyle = bg;
+  ctx.beginPath();
+  for (let i = 0; i < NODES; i++) {
+    const x = nodeX(i), y = cy - g.nodes[i] * maxHalf;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.lineTo(nodeX(NODES - 1) + 14 * S, cy);
+  for (let i = NODES - 1; i >= 0; i--) {
+    const x = nodeX(i), y = cy + g.nodes[i] * maxHalf;
+    ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.fill();
+
+  // Center fuller ridge line
+  ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+  ctx.lineWidth = 2 * S;
+  ctx.beginPath();
+  ctx.moveTo(x0, cy);
+  ctx.lineTo(nodeX(NODES - 1), cy);
+  ctx.stroke();
+
+  // Dark Slag Crust overlays
+  for (let i = 0; i < NODES; i++) {
+    if (!g.slag[i]) continue;
+    const x = nodeX(i), h = g.nodes[i] * maxHalf * 0.85;
+    ctx.fillStyle = '#212529';
+    ctx.strokeStyle = '#ff922b';
+    ctx.lineWidth = 1.5 * S;
+    rrect(x - 8 * S, cy - h, 16 * S, h * 2, 4 * S);
+    ctx.fill(); ctx.stroke();
+  }
+
+  // Cracks if hurt
+  ctx.strokeStyle = '#110402';
+  ctx.lineWidth = 2 * S;
+  for (const c of g.cracks) {
+    ctx.beginPath();
+    ctx.moveTo(c.x - 8 * S, c.y - 10 * S);
+    ctx.lineTo(c.x + 2 * S, c.y);
+    ctx.lineTo(c.x - 3 * S, c.y + 11 * S);
+    ctx.stroke();
+  }
+
+  // Dotted Master Blueprint Outline (Target Profile)
+  ctx.save();
+  ctx.setLineDash([5 * S, 5 * S]);
+  ctx.strokeStyle = 'rgba(255,255,255,0.88)';
+  ctx.lineWidth = 2 * S;
+  ctx.beginPath();
+  for (let i = 0; i < NODES; i++) {
+    const x = nodeX(i), y = cy - g.target[i] * maxHalf;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.lineTo(nodeX(NODES - 1) + 12 * S, cy);
+  for (let i = NODES - 1; i >= 0; i--) {
+    const x = nodeX(i), y = cy + g.target[i] * maxHalf;
+    ctx.lineTo(x, y);
+  }
+  ctx. stroke();
+  ctx.restore();
+
+  // Active Sweet-Spot Timing Reticle
+  if (state === STATES.PLAYING) {
+    const sx = nodeX(g.spot);
+    const inWin = g.ring >= 0.22 && g.ring <= 0.44;
+    ctx.strokeStyle = inWin ? '#51cf66' : 'rgba(255,255,255,0.55)';
+    ctx.lineWidth = (inWin ? 3 : 2) * S;
+    ctx.beginPath();
+    ctx.arc(sx, cy, 14 * S, 0, TAU);
+    ctx.stroke();
+
+    // Shrinking timing ring
+    const rr2 = (14 + g.ring * 34) * S;
+    ctx.strokeStyle = inWin ? '#ffe066' : '#ff922b';
+    ctx.lineWidth = 2.5 * S;
+    ctx.beginPath();
+    ctx.arc(sx, cy, rr2, 0, TAU);
+    ctx.stroke();
+  }
+}
+
+function drawHammer(now) {
+  if (state !== STATES.PLAYING) return;
+  const g = G, cy = ay - 28 * S;
+  const hx = (ax - bladeLen * 0.48) + g.hx * (bladeLen * 0.96);
+  const lift = (1 - g.hDown) * (72 + g.hCharge * 28) * S;
+  const hy = cy - 26 * S - lift;
+
+  // Aiming guide line
+  ctx.save();
+  ctx.strokeStyle = g.hCharge >= 0.32 ? '#ffd43b' : 'rgba(255,255,255,0.35)';
+  ctx.setLineDash([4 * S, 4 * S]);
+  ctx.lineWidth = 1.5 * S;
+  ctx.beginPath();
+  ctx.moveTo(hx, hy + 18 * S);
+  ctx.lineTo(hx, cy);
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.save();
+  ctx.translate(hx, hy);
+  ctx.rotate(-0.15 + g.hDown * 0.28 - g.hCharge * 0.18);
+
+  // Wooden handle extending right
+  ctx.fillStyle = '#7c4724';
+  rrect(10 * S, -6 * S, 68 * S, 12 * S, 4 * S);
+  ctx.fill();
+
+  // Heavy forged steel hammerhead
+  const hg = ctx.createLinearGradient(-22 * S, -18 * S, 22 * S, 18 * S);
+  hg.addColorStop(0, '#adb5bd'); hg.addColorStop(0.5, '#495057'); hg.addColorStop(1, '#212529');
+  ctx.fillStyle = hg;
+  rrect(-20 * S, -22 * S, 40 * S, 44 * S, 6 * S);
+  ctx.fill();
+  ctx.strokeStyle = g.hCharge >= 0.32 ? '#ffd43b' : 'rgba(255,255,255,0.4)';
+  ctx.lineWidth = 2 * S;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawBellowsBtn(now) {
+  if (state !== STATES.PLAYING) return;
+  const b = bellowGeo(), rdy = G.bellowsCd <= 0, low = G.temp < 0.32;
+  const sq = 1 - G.bellowsAnim * 0.22;
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  ctx.scale(1, sq);
+  ctx.fillStyle = rdy ? (low ? '#e8590c' : '#5c2b16') : '#2b1b14';
+  ctx.beginPath(); ctx.arc(0, 0, b.R, 0, TAU); ctx.fill();
+  ctx.lineWidth = 3.5;
+  ctx.strokeStyle = low && Math.sin(now * 0.015) > 0 ? '#ffd43b' : 'rgba(255,200,150,0.45)';
+  ctx.stroke();
+  txt('BELLOWS', 0, -4 * S, b.R * 0.32, '#fff', 'center', b.R * 1.6, 900);
+  txt('HEAT +', 0, 10 * S, b.R * 0.28, '#ffd43b', 'center', b.R * 1.5, 700);
+  ctx.restore();
+}
+
+function panel(x, y, w, h) {
+  rrect(x, y, w, h, 12);
+  ctx.fillStyle = 'rgba(20, 8, 5, 0.78)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255, 183, 3, 0.28)'; ctx.lineWidth = 1.5; ctx.stroke();
+}
+
+function drawHUD(now) {
+  const g = G, pad = 10, topY = safeTop + 8, ph = Math.min(54, W * 0.13);
+  const w1 = W * 0.31, w2 = W * 0.25, w3 = W * 0.28;
+
+  // Left: Score
+  panel(pad, topY, w1, ph);
+  txt('SCORE', pad + w1 * 0.5, topY + ph * 0.28, Math.min(11, W / 34), '#d9a98a', 'center', w1 - 10, 700);
+  txt(String(Math.floor(g.score)), pad + w1 * 0.5, topY + ph * 0.68, Math.min(23, W / 16), '#fff', 'center', w1 - 12, 900);
+
+  // Center: Streak Multiplier & Blade Count
+  const x2 = W * 0.5 - w2 * 0.5;
+  panel(x2, topY, w2, ph);
+  txt('x' + mult().toFixed(1), W * 0.5, topY + ph * 0.35, Math.min(19, W / 19), '#ffb703', 'center', w2 - 8, 900);
+  txt('BLADE ' + (g.swords + 1), W * 0.5, topY + ph * 0.74, Math.min(11, W / 34), '#f4d8c6', 'center', w2 - 8, 700);
+
+  // Right: Lives (Anvil Shields)
+  const x3 = W - pad - w3;
+  panel(x3, topY, w3, ph);
+  for (let i = 0; i < 3; i++) {
+    const hx = x3 + w3 * (0.22 + i * 0.28), hy = topY + ph * 0.5, r = Math.min(8, w3 / 12);
+    ctx.fillStyle = i < g.lives ? '#ff6b35' : 'rgba(255,255,255,0.15)';
+    ctx.beginPath(); ctx.arc(hx, hy, r, 0, TAU); ctx.fill();
+  }
+
+  // Forge Temperature Bar below top panels
+  const by = topY + ph + 10, bw = Math.min(320, W - 24), bx = W * 0.5 - bw * 0.5;
+  rrect(bx, by, bw, 12, 6);
+  ctx.fillStyle = 'rgba(20,8,5,0.8)'; ctx.fill();
+  // Safe forging window ticks (0.22 to 0.92)
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.fillRect(bx + bw * 0.22, by - 2, 2, 16);
+  ctx.fillRect(bx + bw * 0.92, by - 2, 2, 16);
+
+  const tc = g.temp < 0.22 ? '#74c0fc' : g.temp > 0.92 ? '#ff4d00' : '#ffb703';
+  rrect(bx, by, Math.max(8, bw * g.temp), 12, 6);
+  ctx.fillStyle = tc; ctx.fill();
+
+  const status = g.temp < 0.26 ? 'TOO COLD! TAP BELLOWS!' : g.temp > 0.88 ? 'DANGER: OVERHEATING!' : g.wName;
+  txt(status, W * 0.5, by + 23, Math.min(12, W / 30), g.temp < 0.26 || g.temp > 0.88 ? '#ff8787' : '#ffd8a8', 'center', bw, 800);
+
+  // Onboarding Hint
+  if (state === STATES.PLAYING && g.hint > 0) {
+    ctx.globalAlpha = clamp(g.hint, 0, 1);
+    const hw = Math.min(320, W * 0.88), hy = ay + 75 * S;
+    panel(W * 0.5 - hw * 0.5, hy - 30, hw, 60);
+    txt('DRAG to aim  •  RELEASE to strike', W * 0.5, hy - 10, Math.min(15, W / 22), '#fff', 'center', hw - 16, 900);
+    txt('Match the dotted outline. Tap BELLOWS to keep hot!', W * 0.5, hy + 12, Math.min(12, W / 30), '#ffd8a8', 'center', hw - 16, 600);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawStart(now) {
+  ctx.fillStyle = 'rgba(10, 4, 2, 0.55)'; ctx.fillRect(0, 0, W, H);
+  const b = Math.min(54, W / 7);
+  txt('ANVIL STRIKE', W * 0.5, safeTop + H * 0.16, b, '#ffb703', 'center', W - 28, 900);
+  txt('Forge glowing steel to the master blueprint', W * 0.5, safeTop + H * 0.16 + b * 0.85, Math.min(16, W / 22), '#fff4e6', 'center', W - 28, 600);
+  ctx.globalAlpha = 0.65 + 0.35 * Math.sin(now * 0.006);
+  txt('TAP TO FORGE', W * 0.5, H * 0.68, Math.min(28, W / 12), '#fff', 'center', W - 28, 900);
+  ctx.globalAlpha = 1;
+  if (top5[0]) txt('BEST ' + top5[0] + '  •  BLADES ' + bestSwords, W * 0.5, H * 0.68 + 36, Math.min(15, W / 24), '#ffd8a8', 'center', W - 28, 700);
+}
+
+function drawOver(now) {
+  ctx.fillStyle = 'rgba(10, 4, 2, 0.76)'; ctx.fillRect(0, 0, W, H);
+  const pw = Math.min(W - 24, 360), ph = Math.min(H - safeTop - 24, 350);
+  const x = W * 0.5 - pw * 0.5, y = Math.max(safeTop + 10, (H - ph) * 0.5), k = ph / 350;
+  panel(x, y, pw, ph);
+  txt(G.reason || 'BLADE RUINED', W * 0.5, y + 30 * k, Math.min(24, pw / 11), '#ff8787', 'center', pw - 24, 900);
+  txt(String(Math.floor(G.score)), W * 0.5, y + 72 * k, Math.min(44, pw / 6.5), '#fff', 'center', pw - 24, 900);
+  txt(G.hiNew ? 'NEW HIGH SCORE!' : 'Blades Forged: ' + G.swords + '  •  Best Streak: ' + G.maxStreak, W * 0.5, y + 108 * k, Math.min(14, pw / 20), G.hiNew ? '#ffb703' : '#f4d8c6', 'center', pw - 24, 800);
+  txt('TOP 5 SMITHS', W * 0.5, y + 136 * k, 12, '#d9a98a', 'center', pw - 24, 700);
+
+  for (let i = 0; i < 5; i++) {
+    const yy = y + (160 + i * 23) * k, sc = top5[i], me = i === G.rank;
+    if (me) { rrect(x + 16, yy - 10 * k, pw - 32, 20 * k, 6); ctx.fillStyle = 'rgba(255,183,3,0.22)'; ctx.fill(); }
+    txt((i + 1) + '.', x + 28, yy, 14, me ? '#ffb703' : '#d9a98a', 'left', 30, 800);
+    txt(sc === undefined ? '-' : String(sc), x + pw - 28, yy, 14, me ? '#ffb703' : '#fff4e6', 'right', pw - 80, 800);
+  }
+  if (performance.now() - overAt > 800) {
+    ctx.globalAlpha = 0.65 + 0.35 * Math.sin(now * 0.007);
+    txt('TAP TO FORGE AGAIN', W * 0.5, y + ph - 26 * k, Math.min(20, pw / 15), '#ffb703', 'center', pw - 24, 900);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function draw(now) {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  if (G.shake > 0.3) ctx.translate(rr(-1, 1) * G.shake, rr(-1, 1) * G.shake);
+
+  drawBackground(now);
+  drawAnvil();
+  drawSword(now);
+  drawHammer(now);
+
+  for (const s of G.steam) {
+    ctx.globalAlpha = clamp(s.l, 0, 1) * 0.45;
+    ctx.fillStyle = '#e7f5ff';
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, TAU); ctx.fill();
+  }
+  for (const p of G.parts) {
+    ctx.globalAlpha = clamp(p.l / p.m, 0, 1);
+    ctx.fillStyle = p.c;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  for (const p of G.pops) {
+    ctx.globalAlpha = clamp(p.l * 1.4, 0, 1);
+    txt(p.t, clamp(p.x, 70, W - 70), p.y, p.sz, p.col, 'center', W - 20, 900);
+  }
+  ctx.globalAlpha = 1;
+  if (G.flash > 0) {
+    ctx.fillStyle = `rgba(255,80,40,${G.flash * 0.35})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+  ctx.restore();
+
+  if (state === STATES.START) drawStart(now);
+  else {
+    drawHUD(now);
+    drawBellowsBtn(now);
+    if (state === STATES.GAMEOVER) drawOver(now);
+  }
+}
+
+resize();
+resetGame();
+startLoop();
+})();
+</script>
+</body>
+</html>

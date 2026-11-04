@@ -1,0 +1,1105 @@
+<!-- FILE: domino-riot.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Domino Riot</title>
+<style>
+:root{--bg:#281a11;--fg:#fff8eb;--accent:#ffd166;--emerald:#06d6a0;--danger:#ef476f}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#281a11;--fg:#fff8eb}}
+:root[data-theme="dark"]{--bg:#281a11;--fg:#fff8eb}
+html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;overscroll-behavior:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+canvas{position:fixed;inset:0;display:block;touch-action:none}
+#probe{position:fixed;top:0;left:0;visibility:hidden;padding-top:env(safe-area-inset-top,0px)}
+</style>
+</head>
+<body>
+<div id="probe"></div>
+<canvas id="c"></canvas>
+<script>
+(() => {
+'use strict';
+const STATES = { START: 0, PLAYING: 1, GAMEOVER: 2 };
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), probe = document.getElementById('probe');
+const TAU = Math.PI * 2, STEP_DIST = 26, MAX_GAP = 37;
+const PAL = ['#ff595e', '#ffca3a', '#8ac926', '#1982c4', '#9b5de5', '#f15bb5'];
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const rr = (a, b) => a + Math.random() * (b - a);
+function mb(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* ---------- storage ---------- */
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+};
+const loadTop = () => {
+  try {
+    const a = JSON.parse(store.get('dominoriot.top5') || '[]');
+    return Array.isArray(a) ? a.filter(n => typeof n === 'number' && isFinite(n)).slice(0, 5) : [];
+  } catch (e) { return []; }
+};
+let top5 = loadTop();
+let bestStage = parseInt(store.get('dominoriot.stage') || '0', 10) || 0;
+let bestChain = parseInt(store.get('dominoriot.chain') || '0', 10) || 0;
+function saveScore(sc, stg, ch) {
+  const s = Math.floor(sc);
+  const a = top5.slice(); a.push(s); a.sort((x, y) => y - x); top5 = a.slice(0, 5);
+  store.set('dominoriot.top5', JSON.stringify(top5));
+  if (stg > bestStage) { bestStage = stg; store.set('dominoriot.stage', String(bestStage)); }
+  if (ch > bestChain) { bestChain = ch; store.set('dominoriot.chain', String(bestChain)); }
+  return s > 0 ? top5.indexOf(s) : -1;
+}
+
+/* ---------- canvas & 2.5D tabletop projection ---------- */
+let W = 0, H = 0, dpr = 1, safeTop = 0, S = 1, OX = 0, OY = 0;
+const BW = 360, BH = 520, TILT = 0.84;
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 3);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  safeTop = probe.offsetHeight || 0;
+  const availH = H - safeTop - 150;
+  const availW = W - 24;
+  S = Math.max(0.5, Math.min(availW / BW, availH / (BH * TILT + 34)));
+  OX = W * 0.5;
+  OY = safeTop + 86 + (availH - BH * TILT * S) * 0.5 + BH * 0.5 * TILT * S;
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 120));
+
+const P = (wx, wy, wz = 0) => ({
+  x: OX + wx * S,
+  y: OY + wy * TILT * S - wz * S
+});
+const unP = (sx, sy) => ({
+  x: (sx - OX) / S,
+  y: (sy - OY) / (TILT * S)
+});
+
+/* ---------- audio engine ---------- */
+let AC = null, lastClack = 0;
+function audio() {
+  if (!AC) {
+    try {
+      const C = window.AudioContext || window.webkitAudioContext;
+      if (C) AC = new C();
+    } catch (e) { AC = null; }
+  }
+  if (AC && AC.state === 'suspended') AC.resume();
+  return AC;
+}
+function tone(type, f0, f1, dur, vol, delay = 0) {
+  const a = audio(); if (!a) return;
+  try {
+    const o = a.createOscillator(), g = a.createGain(), t = a.currentTime + delay;
+    o.type = type; o.frequency.setValueAtTime(f0, t);
+    o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(a.destination);
+    o.start(t); o.stop(t + dur + 0.03);
+  } catch (e) {}
+}
+const sfx = {
+  place(n) {
+    const f = 320 + (n % 12) * 18;
+    tone('triangle', f, f * 1.35, 0.055, 0.09);
+  },
+  clack(chain) {
+    const now = performance.now();
+    if (now - lastClack < 22) return;
+    lastClack = now;
+    const semi = Math.min(chain, 36);
+    const f = 370 * Math.pow(1.045, semi);
+    tone('triangle', f * 1.4, f * 0.65, 0.065, 0.14);
+    tone('sine', f * 2.0, f * 1.95, 0.09, 0.08);
+  },
+  flick() {
+    tone('sine', 240, 620, 0.11, 0.14);
+  },
+  gate() {
+    tone('triangle', 587.33, 1174.66, 0.18, 0.15);
+    tone('sine', 880, 1760, 0.22, 0.1, 0.04);
+  },
+  star() {
+    tone('sine', 987.77, 1975.5, 0.22, 0.15);
+  },
+  gong() {
+    [220, 330, 440, 659.25, 880].forEach((f, i) => tone('triangle', f, f * 0.98, 0.85, 0.14, i * 0.04));
+    tone('sawtooth', 110, 55, 0.9, 0.18);
+  },
+  fail() {
+    tone('sawtooth', 260, 55, 0.45, 0.16);
+    tone('square', 140, 42, 0.4, 0.1);
+  },
+  undo() { tone('sine', 480, 320, 0.09, 0.09); },
+  over() { tone('sawtooth', 340, 38, 0.85, 0.16); },
+  start() { tone('triangle', 330, 660, 0.15, 0.12); }
+};
+
+/* ---------- procedural puzzle generator ---------- */
+function buildLevel(lv) {
+  const rnd = mb(4099 + lv * 193);
+  const doms = [], stars = [], blocks = [], bombs = [];
+  const startX = rr(-95, 95) * (lv === 0 ? 0.25 : 1);
+  const startY = 205;
+  const gongX = lv === 0 ? 0 : rr(-95, 95);
+  const gongY = -205;
+
+  // Starter domino (fixed, ready to flick)
+  doms.push({
+    x: startX, y: startY, ang: -Math.PI * 0.5,
+    state: 0, fall: 0, col: '#ffd166', starter: true, fixed: true, hit: false
+  });
+
+  // Number of intermediate Split Gates / Booster Arches
+  const nGates = lv === 0 ? 1 : lv < 3 ? 2 : 3;
+  const wyPts = [{ x: startX, y: startY }];
+
+  for (let g = 1; g <= nGates; g++) {
+    const fy = lerp(startY, gongY, g / (nGates + 1)) + rr(-18, 18);
+    const fx = lv === 0 ? 0 : rr(-105, 105);
+    wyPts.push({ x: fx, y: fy, gate: true });
+    // Pre-placed cluster of 3 tiles around each gate to reward routing through it
+    const ga = Math.atan2(gongY - fy, gongX - fx);
+    for (let k = -1; k <= 1; k++) {
+      doms.push({
+        x: fx + Math.cos(ga) * (k * 22),
+        y: fy + Math.sin(ga) * (k * 22),
+        ang: ga, state: 0, fall: 0, col: '#06d6a0', starter: false, fixed: true, gateTile: k === 0, hit: false
+      });
+    }
+  }
+  wyPts.push({ x: gongX, y: gongY });
+
+  // Place stars slightly off the direct line to create risk-reward detours
+  for (let i = 0; i < wyPts.length - 1; i++) {
+    const a = wyPts[i], b = wyPts[i + 1];
+    const mx = (a.x + b.x) * 0.5 + (lv === 0 ? 0 : rr(-58, 58));
+    const my = (a.y + b.y) * 0.5;
+    stars.push({ x: clamp(mx, -135, 135), y: clamp(my, -175, 175), r: 15, got: false, ph: rnd() * TAU });
+  }
+
+  // Place wooden obstacle blocks between waypoints on higher stages
+  const nBlocks = lv === 0 ? 0 : Math.min(5, 1 + Math.floor(lv * 0.75));
+  for (let b = 0; b < nBlocks; b++) {
+    for (let tr = 0; tr < 20; tr++) {
+      const bx = rr(-115, 115), by = rr(-145, 145);
+      const bw = rr(44, 68), bh = rr(22, 30);
+      const clear = wyPts.every(p => Math.hypot(p.x - bx, p.y - by) > 54) &&
+                    stars.every(s => Math.hypot(s.x - bx, s.y - by) > 38);
+      if (clear) {
+        blocks.push({ x: bx, y: by, w: bw, h: bh });
+        break;
+      }
+    }
+  }
+
+  // Place volatile Ink Bombs (if toppled by a domino, chain explodes!)
+  const nBombs = lv < 2 ? 0 : Math.min(4, Math.floor((lv - 1) * 0.8) + 1);
+  for (let m = 0; m < nBombs; m++) {
+    for (let tr = 0; tr < 20; tr++) {
+      const mx = rr(-125, 125), my = rr(-155, 155);
+      const clear = wyPts.every(p => Math.hypot(p.x - mx, p.y - my) > 48) &&
+                    stars.every(s => Math.hypot(s.x - mx, s.y - my) > 34) &&
+                    blocks.every(b => Math.abs(b.x - mx) > b.w * 0.6 + 18 || Math.abs(b.y - my) > b.h * 0.6 + 18);
+      if (clear) {
+        bombs.push({ x: mx, y: my, r: 15, hit: false });
+        break;
+      }
+    }
+  }
+
+  // Compute generous but tightening tile budget based on total route distance
+  let dist = 0;
+  for (let i = 0; i < wyPts.length - 1; i++) {
+    dist += Math.hypot(wyPts[i + 1].x - wyPts[i].x, wyPts[i + 1].y - wyPts[i].y);
+  }
+  const par = Math.ceil(dist / STEP_DIST);
+  const diff = 1 - Math.exp(-lv / 6);
+  const extra = Math.round(lerp(14, 6, diff));
+
+  return {
+    doms, stars, blocks, bombs,
+    gong: { x: gongX, y: gongY, r: 26, hit: false, ring: 0 },
+    budget: par + extra,
+    par
+  };
+}
+
+/* ---------- game state ---------- */
+let state = STATES.START, G = null, raf = 0, last = 0, overAt = 0, ui = [];
+const ptr = { id: null, down: false, lx: 0, ly: 0, wx: 0, wy: 0 };
+
+function loadStage() {
+  const g = G, L = buildLevel(g.stage);
+  g.doms = L.doms;
+  g.stars = L.stars;
+  g.blocks = L.blocks;
+  g.bombs = L.bombs;
+  g.gong = L.gong;
+  g.budget = L.budget;
+  g.left = L.budget;
+  g.par = L.par;
+  g.ph = 'build'; // 'build' | 'topple' | 'clear' | 'fail'
+  g.pt = 0;
+  g.chain = 0;
+  g.simT = 0;
+  g.lastToppleT = 0;
+  g.stageScore = g.score;
+  g.strokes = [];
+}
+
+function resetGame() {
+  G = {
+    stage: 0, score: 0, lives: 3, maxChain: 0,
+    doms: [], stars: [], blocks: [], bombs: [], gong: null,
+    budget: 20, left: 20, par: 12,
+    ph: 'build', pt: 0, chain: 0, simT: 0, lastToppleT: 0,
+    parts: [], pops: [], waves: [], strokes: [],
+    shake: 0, slowmo: 1, hint: 1, rank: -1, hiNew: false, reason: '', saved: false
+  };
+  loadStage();
+}
+
+/* ---------- loop control ---------- */
+function stopLoop() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+function startLoop() { stopLoop(); last = performance.now(); raf = requestAnimationFrame(frame); }
+function frame(now) {
+  raf = requestAnimationFrame(frame);
+  const rawDt = Math.min(0.033, Math.max(0.001, (now - last) / 1000));
+  last = now;
+  update(rawDt * (G ? G.slowmo : 1), rawDt);
+  draw(now);
+}
+document.addEventListener('visibilitychange', () => {
+  ptr.down = false; ptr.id = null;
+  document.hidden ? stopLoop() : startLoop();
+});
+window.addEventListener('blur', () => { ptr.down = false; ptr.id = null; });
+
+function startGame() {
+  stopLoop();
+  ptr.down = false; ptr.id = null;
+  resetGame();
+  state = STATES.PLAYING;
+  sfx.start();
+  startLoop();
+}
+
+/* ---------- helpers & juice ---------- */
+const pop = (t, col, wx, wy, sz = 19) => {
+  const s = P(wx, wy, 22);
+  G.pops.push({ t, col, x: s.x, y: s.y, sz, l: 1.05 });
+};
+function burst(wx, wy, n, cols, sp = 160) {
+  const s = P(wx, wy, 14);
+  for (let i = 0; i < n && G.parts.length < 260; i++) {
+    const a = Math.random() * TAU, v = sp * rr(0.35, 1.1);
+    G.parts.push({ x: s.x, y: s.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 50, l: rr(0.4, 0.85), m: 0.85, c: cols[i % cols.length], r: rr(2, 4.5) });
+  }
+}
+
+function insideBlock(wx, wy, pad = 10) {
+  for (const b of G.blocks) {
+    if (Math.abs(wx - b.x) < b.w * 0.5 + pad && Math.abs(wy - b.y) < b.h * 0.5 + pad) return true;
+  }
+  return false;
+}
+
+function tryPlaceDomino(wx, wy) {
+  const g = G;
+  if (g.ph !== 'build' || g.left <= 0) return;
+  wx = clamp(wx, -BW * 0.45, BW * 0.45);
+  wy = clamp(wy, -BH * 0.45, BH * 0.45);
+  if (insideBlock(wx, wy, 9)) return;
+
+  // Check distance from last placed point in current stroke or nearest existing domino
+  const dx = wx - ptr.lx, dy = wy - ptr.ly;
+  const d = Math.hypot(dx, dy);
+  if (d < STEP_DIST) return;
+
+  const steps = Math.min(g.left, Math.floor(d / STEP_DIST));
+  const ang = Math.atan2(dy, dx);
+
+  for (let s = 1; s <= steps; s++) {
+    const nx = ptr.lx + Math.cos(ang) * (STEP_DIST * s);
+    const ny = ptr.ly + Math.sin(ang) * (STEP_DIST * s);
+    if (insideBlock(nx, ny, 8)) {
+      sfx.fail();
+      break;
+    }
+    // Avoid overlapping existing fixed tiles too closely
+    if (g.doms.some(o => o.fixed && Math.hypot(o.x - nx, o.y - ny) < 13)) {
+      ptr.lx = nx; ptr.ly = ny;
+      continue;
+    }
+    const idx = g.doms.length;
+    g.doms.push({
+      x: nx, y: ny, ang,
+      state: 0, fall: 0,
+      col: PAL[idx % PAL.length],
+      starter: false, fixed: false, hit: false
+    });
+    g.strokes[g.strokes.length - 1].push(g.doms[g.doms.length - 1]);
+    g.left--;
+    sfx.place(idx);
+    ptr.lx = nx; ptr.ly = ny;
+    if (g.hint > 0 && g.budget - g.left >= 4) g.hint = Math.min(g.hint, 0.99);
+  }
+}
+
+function triggerTopple() {
+  const g = G;
+  if (state !== STATES.PLAYING || g.ph !== 'build') return;
+  if (g.doms.filter(d => !d.fixed).length === 0) {
+    pop('DRAW A TRAIL FIRST!', '#ffd166', 0, 60, 20);
+    return;
+  }
+  g.ph = 'topple';
+  g.simT = 0;
+  g.lastToppleT = 0;
+  g.chain = 0;
+  const st = g.doms[0];
+  // Orient starter tile toward the nearest player-placed domino within range
+  let nearest = null, bestD = 55;
+  for (let i = 1; i < g.doms.length; i++) {
+    const d = Math.hypot(g.doms[i].x - st.x, g.doms[i].y - st.y);
+    if (d < bestD) { bestD = d; nearest = g.doms[i]; }
+  }
+  if (nearest) st.ang = Math.atan2(nearest.y - st.y, nearest.x - st.x);
+  st.state = 1;
+  st.fall = 0.05;
+  sfx.flick();
+  G.waves.push({ x: st.x, y: st.y, r: 4, max: 36, col: '#ffd166', l: 0.35 });
+}
+
+function undoStroke() {
+  const g = G;
+  if (state !== STATES.PLAYING || g.ph !== 'build' || !g.strokes.length) return;
+  const lastStroke = g.strokes.pop();
+  if (!lastStroke || !lastStroke.length) return;
+  for (const tile of lastStroke) {
+    const idx = g.doms.indexOf(tile);
+    if (idx !== -1) {
+      g.doms.splice(idx, 1);
+      g.left++;
+    }
+  }
+  sfx.undo();
+}
+
+function clearPlaced() {
+  const g = G;
+  if (state !== STATES.PLAYING || g.ph !== 'build') return;
+  g.doms = g.doms.filter(d => d.fixed);
+  g.left = g.budget;
+  g.strokes = [];
+  sfx.undo();
+}
+
+function failStage(why, wx, wy) {
+  const g = G;
+  if (g.ph === 'fail' || g.ph === 'clear') return;
+  g.ph = 'fail';
+  g.pt = 1.65;
+  g.lives--;
+  g.shake = 14;
+  sfx.fail();
+  pop(why, '#ef476f', wx, wy, 22);
+  burst(wx, wy, 24, ['#ef476f', '#ffd166', '#ffffff'], 200);
+  if (g.lives <= 0) {
+    g.reason = why;
+    endGame();
+  }
+}
+
+function endGame() {
+  if (G.saved) return;
+  G.saved = true;
+  state = STATES.GAMEOVER;
+  overAt = performance.now();
+  const prior = top5[0] || 0;
+  G.rank = saveScore(G.score, G.stage + 1, G.maxChain);
+  G.hiNew = G.score > prior && G.score > 0;
+  sfx.over();
+}
+
+/* ---------- update ---------- */
+function update(dt, rawDt) {
+  const g = G;
+  g.shake *= Math.exp(-7 * rawDt);
+  g.slowmo += (1 - g.slowmo) * Math.min(1, rawDt * 4.5);
+
+  for (let i = g.parts.length - 1; i >= 0; i--) {
+    const p = g.parts[i]; p.l -= rawDt;
+    if (p.l <= 0) { g.parts.splice(i, 1); continue; }
+    p.vy += 460 * rawDt; p.x += p.vx * rawDt; p.y += p.vy * rawDt;
+  }
+  for (let i = g.pops.length - 1; i >= 0; i--) {
+    const p = g.pops[i]; p.l -= rawDt;
+    if (p.l <= 0) g.pops.splice(i, 1); else p.y -= 28 * rawDt;
+  }
+  for (let i = g.waves.length - 1; i >= 0; i--) {
+    const w = g.waves[i]; w.l -= rawDt;
+    if (w.l <= 0) g.waves.splice(i, 1);
+    else w.r = lerp(w.r, w.max, rawDt * 10);
+  }
+
+  if (state !== STATES.PLAYING) return;
+  if (g.hint < 1) g.hint = Math.max(0, g.hint - rawDt * 1.4);
+
+  if (g.ph === 'clear') {
+    g.pt -= rawDt;
+    if (g.pt <= 0) {
+      g.stage++;
+      loadStage();
+    }
+    return;
+  }
+  if (g.ph === 'fail') {
+    g.pt -= rawDt;
+    if (g.pt <= 0 && state === STATES.PLAYING) {
+      g.score = g.stageScore;
+      // Reset domino states so the player can edit or re-draw!
+      for (const d of g.doms) { d.state = 0; d.fall = 0; d.hit = false; }
+      for (const s of g.stars) s.got = false;
+      for (const b of g.bombs) b.hit = false;
+      g.gong.hit = false;
+      g.ph = 'build';
+    }
+    return;
+  }
+
+  if (g.ph !== 'topple') return;
+
+  g.simT += dt;
+  const fallSpeed = 6.2; // radians-ish progress per sec
+  let activeFalling = 0;
+
+  for (let i = 0; i < g.doms.length; i++) {
+    const d = g.doms[i];
+    if (d.state !== 1) continue;
+    activeFalling++;
+    d.fall += fallSpeed * dt;
+
+    // Tip world coordinate as the domino leans forward along d.ang
+    const tipDist = Math.sin(Math.min(1, d.fall) * 1.35) * 23;
+    const tx = d.x + Math.cos(d.ang) * tipDist;
+    const ty = d.y + Math.sin(d.ang) * tipDist;
+
+    // Trigger impulse at fall >= 0.36
+    if (d.fall >= 0.36 && !d.hit) {
+      d.hit = true;
+      g.lastToppleT = g.simT;
+      g.chain++;
+      g.maxChain = Math.max(g.maxChain, g.chain);
+      const pts = Math.round(15 * (1 + Math.min(g.chain, 30) * 0.15));
+      g.score += pts;
+      sfx.clack(g.chain);
+
+      if (d.gateTile) {
+        const gPts = 150;
+        g.score += gPts;
+        sfx.gate();
+        pop('GATE BOOST! +' + gPts, '#06d6a0', d.x, d.y, 20);
+        G.waves.push({ x: d.x, y: d.y, r: 6, max: 52, col: '#06d6a0', l: 0.4 });
+      }
+
+      // Check Stars
+      for (const st of g.stars) {
+        if (!st.got && (Math.hypot(st.x - tx, st.y - ty) < st.r + 16 || Math.hypot(st.x - d.x, st.y - d.y) < st.r + 14)) {
+          st.got = true;
+          const sPts = 250;
+          g.score += sPts;
+          sfx.star();
+          pop('STAR! +' + sPts, '#ffd166', st.x, st.y, 22);
+          burst(st.x, st.y, 16, ['#ffd166', '#ffffff'], 180);
+        }
+      }
+
+      // Check Ink Bombs
+      for (const bm of g.bombs) {
+        if (!bm.hit && (Math.hypot(bm.x - tx, bm.y - ty) < bm.r + 13 || Math.hypot(bm.x - d.x, bm.y - d.y) < bm.r + 12)) {
+          bm.hit = true;
+          failStage('BOMB DETONATED!', bm.x, bm.y);
+          return;
+        }
+      }
+
+      // Check Brass Gong!
+      if (!g.gong.hit && (Math.hypot(g.gong.x - tx, g.gong.y - ty) < g.gong.r + 16 || Math.hypot(g.gong.x - d.x, g.gong.y - d.y) < g.gong.r + 16)) {
+        g.gong.hit = true;
+        g.gong.ring = 1.0;
+        g.slowmo = 0.28;
+        g.shake = 16;
+        const starsGot = g.stars.filter(s => s.got).length;
+        const savedBonus = g.left * 40;
+        const stageBonus = 400 + g.stage * 150 + starsGot * 200 + savedBonus;
+        g.score += stageBonus;
+        g.clearBonus = stageBonus;
+        g.starsGot = starsGot;
+        sfx.gong();
+        G.waves.push({ x: g.gong.x, y: g.gong.y, r: 10, max: 120, col: '#ffd166', l: 0.7 });
+        burst(g.gong.x, g.gong.y, 45, ['#ffd166', '#06d6a0', '#ff595e', '#ffffff'], 280);
+        pop('GONG STRUCK! +' + stageBonus, '#ffd166', g.gong.x, g.gong.y, 25);
+        if (g.stage + 1 > bestStage) { bestStage = g.stage + 1; store.set('dominoriot.stage', String(bestStage)); }
+        g.ph = 'clear';
+        g.pt = 2.2;
+        return;
+      }
+
+      // Knock over neighboring standing dominoes within MAX_GAP
+      let nextCandidate = null, minD = MAX_GAP;
+      for (let j = 0; j < g.doms.length; j++) {
+        const o = g.doms[j];
+        if (o.state !== 0) continue;
+        const distFromTip = Math.hypot(o.x - tx, o.y - ty);
+        const distFromBase = Math.hypot(o.x - d.x, o.y - d.y);
+        const effD = Math.min(distFromTip, distFromBase * 0.88);
+        if (effD < MAX_GAP) {
+          // Topple neighbor and align its fall angle along the impulse vector
+          o.state = 1;
+          o.fall = 0.02;
+          if (!o.fixed) {
+            o.ang = Math.atan2(o.y - d.y, o.x - d.x);
+          }
+          if (effD < minD) { minD = effD; nextCandidate = o; }
+        }
+      }
+    }
+
+    if (d.fall >= 1.0) {
+      d.fall = 1.0;
+      d.state = 2;
+    }
+  }
+
+  // If all falling tiles have settled and the gong wasn't reached, chain stalled!
+  if ((activeFalling === 0 && g.simT > 0.25) || (g.simT - g.lastToppleT > 0.9)) {
+    if (!g.gong.hit) {
+      failStage('CHAIN STALLED!', g.gong.x, g.gong.y + 40);
+    }
+  }
+}
+
+/* ---------- input & hit-testing ---------- */
+function hitUI(x, y) {
+  for (const b of ui) {
+    if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+      b.fn();
+      return true;
+    }
+  }
+  return false;
+}
+
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault(); audio();
+  try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+  if (state === STATES.START) { startGame(); return; }
+  if (state === STATES.GAMEOVER) { if (performance.now() - overAt > 800) startGame(); return; }
+  if (state !== STATES.PLAYING) return;
+
+  if (hitUI(e.clientX, e.clientY)) return;
+  if (G.ph !== 'build' || ptr.id !== null) return;
+
+  const w = unP(e.clientX, e.clientY - (e.pointerType === 'touch' ? 28 : 0));
+  // If tapping directly on the golden starter tile and tiles are placed, flick it!
+  const st = G.doms[0];
+  if (G.doms.length > 4 && Math.hypot(w.x - st.x, w.y - st.y) < 34) {
+    triggerTopple();
+    return;
+  }
+
+  ptr.id = e.pointerId;
+  ptr.down = true;
+  // Snap start of stroke to nearest existing domino if within 42 units
+  let snapX = clamp(w.x, -BW * 0.45, BW * 0.45);
+  let snapY = clamp(w.y, -BH * 0.45, BH * 0.45);
+  let bestD = 42;
+  for (const d of G.doms) {
+    const dist = Math.hypot(d.x - snapX, d.y - snapY);
+    if (dist < bestD) { bestD = dist; snapX = d.x; snapY = d.y; }
+  }
+  ptr.lx = snapX; ptr.ly = snapY;
+  ptr.wx = snapX; ptr.wy = snapY;
+  G.strokes.push([]);
+});
+
+cv.addEventListener('pointermove', e => {
+  if (state !== STATES.PLAYING || ptr.id !== e.pointerId || !ptr.down) return;
+  const w = unP(e.clientX, e.clientY - (e.pointerType === 'touch' ? 28 : 0));
+  ptr.wx = clamp(w.x, -BW * 0.45, BW * 0.45);
+  ptr.wy = clamp(w.y, -BH * 0.45, BH * 0.45);
+  tryPlaceDomino(ptr.wx, ptr.wy);
+});
+
+function endPtr(e) {
+  if (ptr.id === e.pointerId) {
+    ptr.id = null;
+    ptr.down = false;
+    if (G && G.strokes.length && G.strokes[G.strokes.length - 1].length === 0) {
+      G.strokes.pop();
+    }
+  }
+}
+cv.addEventListener('pointerup', endPtr);
+cv.addEventListener('pointercancel', endPtr);
+cv.addEventListener('contextmenu', e => e.preventDefault());
+
+window.addEventListener('keydown', e => {
+  if (e.repeat) return;
+  const c = e.code;
+  if (c === 'Space' || c === 'Enter') {
+    e.preventDefault(); audio();
+    if (state === STATES.START) startGame();
+    else if (state === STATES.GAMEOVER && performance.now() - overAt > 800) startGame();
+    else if (state === STATES.PLAYING && G.ph === 'build') triggerTopple();
+  } else if (c === 'KeyZ' || c === 'KeyU') {
+    e.preventDefault(); undoStroke();
+  } else if (c === 'KeyR' || c === 'KeyC') {
+    e.preventDefault(); clearPlaced();
+  }
+});
+
+/* ---------- rendering ---------- */
+function rrect(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function txt(s, x, y, sz, col, align = 'center', maxW = 0, weight = 800) {
+  let f = sz;
+  ctx.font = weight + ' ' + f + 'px system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
+  if (maxW > 0) {
+    while (f > 9 && ctx.measureText(s).width > maxW) {
+      f--;
+      ctx.font = weight + ' ' + f + 'px system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
+    }
+  }
+  ctx.fillStyle = col; ctx.textAlign = align; ctx.textBaseline = 'middle';
+  ctx.fillText(s, x, y);
+}
+function shade(hex, k) {
+  const n = parseInt(hex.slice(1), 16);
+  const f = v => clamp(Math.round(v * k), 0, 255);
+  return 'rgb(' + f(n >> 16) + ',' + f((n >> 8) & 255) + ',' + f(n & 255) + ')';
+}
+
+function drawTable() {
+  const bg = ctx.createRadialGradient(W * 0.5, H * 0.5, 40, W * 0.5, H * 0.5, Math.max(W, H) * 0.75);
+  bg.addColorStop(0, '#3d271a'); bg.addColorStop(1, '#1a0f09');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+  const tl = P(-BW * 0.5, -BH * 0.5), br = P(BW * 0.5, BH * 0.5);
+  const tw = br.x - tl.x, th = br.y - tl.y, rim = 14 * S;
+
+  // Drop shadow under tabletop
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  rrect(tl.x - rim + 6 * S, tl.y - rim + 18 * S, tw + rim * 2, th + rim * 2 + 12 * S, 18 * S);
+  ctx.fill();
+
+  // Extruded front edge of wood table
+  ctx.fillStyle = '#3b2110';
+  rrect(tl.x - rim, tl.y - rim + 10 * S, tw + rim * 2, th + rim * 2, 16 * S);
+  ctx.fill();
+
+  // Outer oak frame
+  const fg = ctx.createLinearGradient(tl.x, tl.y, br.x, br.y);
+  fg.addColorStop(0, '#8c5832'); fg.addColorStop(0.5, '#6e4222'); fg.addColorStop(1, '#4f2d15');
+  ctx.fillStyle = fg;
+  rrect(tl.x - rim, tl.y - rim, tw + rim * 2, th + rim * 2, 16 * S);
+  ctx.fill();
+
+  // Inner felt/wood playfield
+  const pg = ctx.createLinearGradient(0, tl.y, 0, br.y);
+  pg.addColorStop(0, '#e9d5b5'); pg.addColorStop(0.5, '#dfC59E'); pg.addColorStop(1, '#cfaee0'.slice(0, 0) + '#c8aa7e');
+  ctx.fillStyle = pg;
+  rrect(tl.x, tl.y, tw, th, 10 * S);
+  ctx.fill();
+
+  // Subtle blueprint grid on board
+  ctx.save();
+  ctx.strokeStyle = 'rgba(110, 66, 34, 0.11)';
+  ctx.lineWidth = 1;
+  for (let gx = -150; gx <= 150; gx += 30) {
+    const a = P(gx, -BH * 0.48), b = P(gx, BH * 0.48);
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  }
+  for (let gy = -240; gy <= 240; gy += 30) {
+    const a = P(-BW * 0.48, gy), b = P(BW * 0.48, gy);
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawBlock(b) {
+  const tl = P(b.x - b.w * 0.5, b.y - b.h * 0.5, 16);
+  const br = P(b.x + b.w * 0.5, b.y + b.h * 0.5, 16);
+  const bBot = P(b.x + b.w * 0.5, b.y + b.h * 0.5, 0);
+  const w = br.x - tl.x, h = br.y - tl.y, extrude = bBot.y - br.y;
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.28)';
+  rrect(tl.x + 4 * S, tl.y + extrude + 3 * S, w, h, 4 * S);
+  ctx.fill();
+
+  // Front face
+  ctx.fillStyle = '#5c381c';
+  rrect(tl.x, tl.y + extrude, w, h, 4 * S);
+  ctx.fill();
+
+  // Top face
+  const tg = ctx.createLinearGradient(tl.x, tl.y, br.x, br.y);
+  tg.addColorStop(0, '#9c663b'); tg.addColorStop(1, '#784b27');
+  ctx.fillStyle = tg;
+  rrect(tl.x, tl.y, w, h, 4 * S);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+  ctx.lineWidth = 1.2 * S;
+  ctx.stroke();
+}
+
+function drawBomb(bm, now) {
+  const p = P(bm.x, bm.y, 0), r = bm.r * S;
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.beginPath(); ctx.ellipse(p.x + 2 * S, p.y + 3 * S, r * 1.05, r * 0.75, 0, 0, TAU); ctx.fill();
+
+  // Danger aura ring
+  ctx.strokeStyle = 'rgba(239, 71, 111, 0.45)';
+  ctx.lineWidth = 1.5 * S;
+  ctx.beginPath(); ctx.ellipse(p.x, p.y, r * 1.45, r * 1.45 * TILT, 0, 0, TAU); ctx.stroke();
+
+  const cy = p.y - r * 0.55;
+  const g = ctx.createRadialGradient(p.x - r * 0.3, cy - r * 0.3, r * 0.1, p.x, cy, r);
+  g.addColorStop(0, '#5c677d'); g.addColorStop(0.5, '#212529'); g.addColorStop(1, '#0b090a');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(p.x, cy, r, 0, TAU); ctx.fill();
+
+  // Sparking fuse
+  ctx.fillStyle = Math.sin(now * 0.025) > 0 ? '#ffd166' : '#ef476f';
+  ctx.beginPath(); ctx.arc(p.x + r * 0.4, cy - r * 0.95, 3.5 * S, 0, TAU); ctx.fill();
+  txt('!', p.x, cy + 1 * S, r * 1.1, '#ef476f', 'center', 0, 900);
+}
+
+function drawStar(st, now) {
+  if (st.got) return;
+  const bob = Math.sin(now * 0.005 + st.ph) * 3;
+  const p = P(st.x, st.y, 12 + bob), sh = P(st.x, st.y, 0), r = 13 * S;
+  ctx.fillStyle = 'rgba(0,0,0,0.22)';
+  ctx.beginPath(); ctx.ellipse(sh.x, sh.y, r * 0.7, r * 0.4, 0, 0, TAU); ctx.fill();
+
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  ctx.rotate(Math.sin(now * 0.003 + st.ph) * 0.2);
+  ctx.fillStyle = '#ffd166';
+  ctx.strokeStyle = '#d97706';
+  ctx.lineWidth = 1.5 * S;
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const a = -Math.PI * 0.5 + i * Math.PI / 5;
+    const rad = i % 2 === 0 ? r : r * 0.46;
+    ctx.lineTo(Math.cos(a) * rad, Math.sin(a) * rad);
+  }
+  ctx.closePath();
+  ctx.fill(); ctx.stroke();
+  ctx.restore();
+}
+
+function drawGong(gObj, now) {
+  const p = P(gObj.x, gObj.y, 0), r = gObj.r * S;
+  const shakeX = gObj.hit ? Math.sin(now * 0.08) * 3 * S : 0;
+
+  // Base shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.beginPath(); ctx.ellipse(p.x, p.y + 4 * S, r * 1.35, r * 0.55, 0, 0, TAU); ctx.fill();
+
+  // Pulsing target ring on floor
+  const pulse = 1 + 0.1 * Math.sin(now * 0.007);
+  ctx.strokeStyle = '#ffd166';
+  ctx.lineWidth = 2.5 * S;
+  ctx.beginPath();
+  ctx.ellipse(p.x, p.y, (r + 12 * S) * pulse, (r + 12 * S) * TILT * pulse, 0, 0, TAU);
+  ctx.stroke();
+
+  // Red Lacquered Frame Pillars
+  const postW = 6 * S, postH = 44 * S;
+  ctx.fillStyle = '#9e2a2b';
+  ctx.fillRect(p.x - r * 1.15, p.y - postH, postW, postH);
+  ctx.fillRect(p.x + r * 1.15 - postW, p.y - postH, postW, postH);
+  // Top crossbar
+  rrect(p.x - r * 1.3, p.y - postH - 6 * S, r * 2.6, 8 * S, 3 * S);
+  ctx.fill();
+
+  // Hanging Golden Brass Gong Disc
+  const gx = p.x + shakeX, gy = p.y - postH * 0.52;
+  const gg = ctx.createRadialGradient(gx - r * 0.25, gy - r * 0.25, r * 0.1, gx, gy, r * 0.9);
+  gg.addColorStop(0, '#fff9db'); gg.addColorStop(0.45, '#fcc419'); gg.addColorStop(1, '#b45309');
+  ctx.fillStyle = gg;
+  ctx.beginPath(); ctx.arc(gx, gy, r * 0.85, 0, TAU); ctx.fill();
+  ctx.strokeStyle = '#78350f'; ctx.lineWidth = 2 * S; ctx.stroke();
+
+  // Inner bullseye boss
+  ctx.fillStyle = '#f59f00';
+  ctx.beginPath(); ctx.arc(gx, gy, r * 0.28, 0, TAU); ctx.fill();
+}
+
+function drawDomino(d, now) {
+  const f = d.fall; // 0 = standing upright, 1 = flat on board
+  const hStand = 24 * (1 - f * 0.72) + 4;
+  const lean = f * 17;
+  const tx = d.x + Math.cos(d.ang) * lean;
+  const ty = d.y + Math.sin(d.ang) * lean;
+
+  const base = P(d.x, d.y, 0);
+  const top = P(tx, ty, hStand);
+  const w = 13 * S;
+
+  // Cast shadow on board
+  ctx.fillStyle = 'rgba(0,0,0,0.26)';
+  ctx.beginPath();
+  ctx.ellipse(base.x + (top.x - base.x) * 0.6 + 3 * S, base.y + (top.y - base.y) * 0.6 + 2 * S, w * 0.85, (6 + f * 8) * S, d.ang, 0, TAU);
+  ctx.fill();
+
+  // Starter tile pulsing halo during build phase
+  if (d.starter && G.ph === 'build') {
+    const pr = (18 + 4 * Math.sin(now * 0.008)) * S;
+    ctx.strokeStyle = '#ffd166';
+    ctx.lineWidth = 2 * S;
+    ctx.beginPath(); ctx.ellipse(base.x, base.y, pr, pr * TILT, 0, 0, TAU); ctx.stroke();
+  }
+
+  //perp vector across tile width
+  const px = -Math.sin(d.ang) * (w * 0.5);
+  const py = Math.cos(d.ang) * (w * 0.5) * TILT;
+
+  // 3D Side/Back thickness body
+  ctx.fillStyle = shade(d.col, 0.65);
+  ctx.beginPath();
+  ctx.moveTo(base.x - px, base.y - py);
+  ctx.lineTo(base.x + px, base.y + py);
+  ctx.lineTo(top.x + px, top.y + py);
+  ctx.lineTo(top.x - px, top.y - py);
+  ctx.closePath();
+  ctx.fill();
+
+  // Top / Front Ivory & Colored Face
+  const thk = Math.cos(d.ang) * 4 * S;
+  const thy = Math.sin(d.ang) * 4 * S * TILT;
+  ctx.fillStyle = d.col;
+  ctx.beginPath();
+  ctx.moveTo(top.x - px, top.y - py);
+  ctx.lineTo(top.x + px, top.y + py);
+  ctx.lineTo(top.x + px + thk, top.y + py + thy);
+  ctx.lineTo(top.x - px + thk, top.y - py + thy);
+  ctx.closePath();
+  ctx.fill();
+
+  // Specular highlight & pip dot
+  ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+  ctx.lineWidth = 1.2 * S;
+  ctx.beginPath();
+  ctx.moveTo(top.x - px, top.y - py);
+  ctx.lineTo(top.x + px, top.y + py);
+  ctx.stroke();
+
+  ctx.fillStyle = '#fff8eb';
+  ctx.beginPath();
+  ctx.arc((base.x + top.x) * 0.5, (base.y + top.y) * 0.5, 1.8 * S, 0, TAU);
+  ctx.fill();
+}
+
+function panel(x, y, w, h) {
+  rrect(x, y, w, h, 12);
+  ctx.fillStyle = 'rgba(26, 15, 9, 0.82)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255, 209, 102, 0.32)'; ctx.lineWidth = 1.5; ctx.stroke();
+}
+
+function drawButton(x, y, w, h, label, sub, col, disabled, fn) {
+  ui.push({ x, y, w, h, fn: disabled ? () => {} : fn });
+  rrect(x, y, w, h, 12);
+  ctx.fillStyle = disabled ? 'rgba(255,255,255,0.1)' : col;
+  ctx.fill();
+  if (!disabled) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+  txt(label, x + w * 0.5, y + h * (sub ? 0.38 : 0.5), Math.min(16, h * 0.38), disabled ? '#8d7b6d' : '#1a0f09', 'center', w - 12, 900);
+  if (sub) txt(sub, x + w * 0.5, y + h * 0.72, Math.min(10, h * 0.22), disabled ? '#756559' : '#3b2110', 'center', w - 12, 800);
+}
+
+function drawHUD(now) {
+  const g = G, pad = 10, topY = safeTop + 8, ph = Math.min(52, W * 0.13);
+  const w1 = W * 0.31, w2 = W * 0.26, w3 = W * 0.28;
+
+  // Left: Score
+  panel(pad, topY, w1, ph);
+  txt('SCORE', pad + w1 * 0.5, topY + ph * 0.28, Math.min(10, W / 35), '#d8b898', 'center', w1 - 10, 700);
+  txt(String(Math.floor(g.score)), pad + w1 * 0.5, topY + ph * 0.68, Math.min(22, W / 16), '#fff', 'center', w1 - 12, 900);
+
+  // Center: Stage & Tiles Left
+  const x2 = W * 0.5 - w2 * 0.5;
+  panel(x2, topY, w2, ph);
+  txt('TILES ' + g.left, W * 0.5, topY + ph * 0.35, Math.min(16, W / 21), g.left <= 3 ? '#ef476f' : '#ffd166', 'center', w2 - 8, 900);
+  txt('STAGE ' + (g.stage + 1), W * 0.5, topY + ph * 0.74, Math.min(10, W / 35), '#e6ccb2', 'center', w2 - 8, 700);
+
+  // Right: Lives
+  const x3 = W - pad - w3;
+  panel(x3, topY, w3, ph);
+  for (let i = 0; i < 3; i++) {
+    const hx = x3 + w3 * (0.22 + i * 0.28), hy = topY + ph * 0.5, r = Math.min(8, w3 / 12);
+    ctx.fillStyle = i < g.lives ? '#ef476f' : 'rgba(255,255,255,0.16)';
+    ctx.beginPath(); ctx.arc(hx, hy, r, 0, TAU); ctx.fill();
+  }
+
+  // Bottom Control Bar during Build Phase
+  if (g.ph === 'build') {
+    const by = H - 58, bh = 46;
+    const wSmall = Math.min(88, W * 0.22);
+    const wBig = Math.min(170, W - wSmall * 2 - 36);
+    const hasPlaced = g.doms.some(d => !d.fixed);
+
+    drawButton(12, by, wSmall, bh, 'UNDO', '', '#e9d5b5', !g.strokes.length, undoStroke);
+    drawButton(W * 0.5 - wBig * 0.5, by, wBig, bh, 'TOPPLE!', 'SPACE / TAP', '#06d6a0', !hasPlaced, triggerTopple);
+    drawButton(W - 12 - wSmall, by, wSmall, bh, 'CLEAR', '', '#ffd166', !hasPlaced, clearPlaced);
+  }
+
+  // Onboarding Hint
+  if (g.ph === 'build' && g.hint > 0) {
+    ctx.globalAlpha = clamp(g.hint, 0, 1);
+    const hw = Math.min(320, W * 0.88), hy = H - 102;
+    panel(W * 0.5 - hw * 0.5, hy - 26, hw, 52);
+    txt('DRAG from the gold domino to the Gong!', W * 0.5, hy - 8, Math.min(14, W / 24), '#fff', 'center', hw - 16, 900);
+    txt('Chain through green gates & stars • Avoid bombs', W * 0.5, hy + 11, Math.min(11, W / 31), '#ffd166', 'center', hw - 16, 600);
+    ctx.globalAlpha = 1;
+  }
+
+  // Stage Clear Banner
+  if (g.ph === 'clear') {
+    const bw = Math.min(320, W * 0.88), by = H * 0.42;
+    panel(W * 0.5 - bw * 0.5, by - 48, bw, 96);
+    txt('STAGE ' + (g.stage + 1) + ' CLEARED!', W * 0.5, by - 20, 24, '#06d6a0', 'center', bw - 20, 900);
+    txt('CHAIN ' + g.chain + '  •  BONUS +' + g.clearBonus, W * 0.5, by + 16, 15, '#ffd166', 'center', bw - 20, 800);
+  }
+}
+
+function drawStart(now) {
+  ctx.fillStyle = 'rgba(18, 10, 5, 0.62)'; ctx.fillRect(0, 0, W, H);
+  const b = Math.min(52, W / 7);
+  txt('DOMINO RIOT', W * 0.5, safeTop + H * 0.18, b, '#ffd166', 'center', W - 28, 900);
+  txt('Draw the chain. Trigger the cascade. Ring the Gong!', W * 0.5, safeTop + H * 0.18 + b * 0.85, Math.min(15, W / 23), '#fff8eb', 'center', W - 28, 600);
+  ctx.globalAlpha = 0.65 + 0.35 * Math.sin(now * 0.006);
+  txt('TAP TO PLAY', W * 0.5, H * 0.68, Math.min(28, W / 12), '#06d6a0', 'center', W - 28, 900);
+  ctx.globalAlpha = 1;
+  if (top5[0]) txt('BEST ' + top5[0] + '  •  STAGE ' + bestStage + '  •  CHAIN ' + bestChain, W * 0.5, H * 0.68 + 36, Math.min(14, W / 25), '#ffd166', 'center', W - 28, 700);
+}
+
+function drawOver(now) {
+  ctx.fillStyle = 'rgba(18, 10, 5, 0.78)'; ctx.fillRect(0, 0, W, H);
+  const pw = Math.min(W - 24, 360), ph = Math.min(H - safeTop - 24, 350);
+  const x = W * 0.5 - pw * 0.5, y = Math.max(safeTop + 10, (H - ph) * 0.5), k = ph / 350;
+  panel(x, y, pw, ph);
+  txt(G.reason || 'CHAIN BROKEN', W * 0.5, y + 30 * k, Math.min(24, pw / 11), '#ef476f', 'center', pw - 24, 900);
+  txt(String(Math.floor(G.score)), W * 0.5, y + 72 * k, Math.min(44, pw / 6.5), '#fff', 'center', pw - 24, 900);
+  txt(G.hiNew ? 'NEW HIGH SCORE!' : 'Stage ' + (G.stage + 1) + '  •  Best Chain ' + G.maxChain, W * 0.5, y + 108 * k, Math.min(14, pw / 20), G.hiNew ? '#ffd166' : '#e6ccb2', 'center', pw - 24, 800);
+  txt('TOP 5 ARCHITECTS', W * 0.5, y + 136 * k, 12, '#d8b898', 'center', pw - 24, 700);
+
+  for (let i = 0; i < 5; i++) {
+    const yy = y + (160 + i * 23) * k, sc = top5[i], me = i === G.rank;
+    if (me) { rrect(x + 16, yy - 10 * k, pw - 32, 20 * k, 6); ctx.fillStyle = 'rgba(255,209,102,0.22)'; ctx.fill(); }
+    txt((i + 1) + '.', x + 28, yy, 14, me ? '#ffd166' : '#d8b898', 'left', 30, 800);
+    txt(sc === undefined ? '-' : String(sc), x + pw - 28, yy, 14, me ? '#ffd166' : '#fff8eb', 'right', pw - 80, 800);
+  }
+  if (performance.now() - overAt > 800) {
+    ctx.globalAlpha = 0.65 + 0.35 * Math.sin(now * 0.007);
+    txt('TAP TO PLAY AGAIN', W * 0.5, y + ph - 26 * k, Math.min(20, pw / 15), '#06d6a0', 'center', pw - 24, 900);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function draw(now) {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  ui = [];
+
+  ctx.save();
+  if (G.shake > 0.3) ctx.translate(rr(-1, 1) * G.shake, rr(-1, 1) * G.shake);
+
+  drawTable();
+
+  // Shockwaves on table surface
+  for (const w of G.waves) {
+    const p = P(w.x, w.y, 0);
+    ctx.globalAlpha = clamp(w.l * 2.5, 0, 1);
+    ctx.strokeStyle = w.col;
+    ctx.lineWidth = 3 * S;
+    ctx.beginPath();
+    ctx.ellipse(p.x, p.y, w.r * S, w.r * S * TILT, 0, 0, TAU);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  // Guide line when dragging a domino trail
+  if (state === STATES.PLAYING && G.ph === 'build' && ptr.down && G.left > 0) {
+    const a = P(ptr.lx, ptr.ly, 4), b = P(ptr.wx, ptr.wy, 4);
+    ctx.strokeStyle = 'rgba(255, 209, 102, 0.7)';
+    ctx.setLineDash([4 * S, 4 * S]);
+    ctx.lineWidth = 2 * S;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Depth-sort all 3D board items back-to-front by world Y
+  const items = [];
+  for (const b of G.blocks) items.push({ y: b.y, fn: () => drawBlock(b) });
+  for (const bm of G.bombs) items.push({ y: bm.y, fn: () => drawBomb(bm, now) });
+  for (const st of G.stars) items.push({ y: st.y, fn: () => drawStar(st, now) });
+  if (G.gong) items.push({ y: G.gong.y, fn: () => drawGong(G.gong, now) });
+  for (const d of G.doms) items.push({ y: d.y, fn: () => drawDomino(d, now) });
+
+  items.sort((a, b) => a.y - b.y);
+  for (const it of items) it.fn();
+
+  for (const p of G.parts) {
+    ctx.globalAlpha = clamp(p.l / p.m, 0, 1);
+    ctx.fillStyle = p.c;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  for (const p of G.pops) {
+    ctx.globalAlpha = clamp(p.l * 1.4, 0, 1);
+    txt(p.t, clamp(p.x, 70, W - 70), p.y, p.sz, p.col, 'center', W - 20, 900);
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  if (state === STATES.START) drawStart(now);
+  else {
+    drawHUD(now);
+    if (state === STATES.GAMEOVER) drawOver(now);
+  }
+}
+
+resize();
+resetGame();
+startLoop();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,1855 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Sonar Strike</title>
+  <style>
+    :root {
+      --bg-dark: #030a14;
+      --teal-glow: #00f2fe;
+      --cyan-bright: #4facfe;
+      --amber-warn: #f59f00;
+      --crimson: #ff4757;
+      --gold: #ffd43b;
+      --hud-panel: rgba(4, 16, 30, 0.82);
+      --hud-border: rgba(79, 172, 254, 0.25);
+      --text-main: #f8fafc;
+      --text-sub: #94a3b8;
+    }
+    [data-theme="navy"] {
+      --cyan-bright: #38d9a9;
+      --teal-glow: #20c997;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --hud-panel: rgba(2, 10, 20, 0.88);
+      }
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      overscroll-behavior: none;
+    }
+    #safe-inset-probe {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 0;
+      height: 0;
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      visibility: hidden;
+      pointer-events: none;
+    }
+    canvas#gameCanvas {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      touch-action: none;
+      display: block;
+      z-index: 1;
+    }
+  </style>
+</head>
+<body>
+  <div id="safe-inset-probe"></div>
+  <canvas id="gameCanvas"></canvas>
+
+  <script>
+  (function () {
+    'use strict';
+
+    // --- AUDIO SYNTHESIS SYSTEM (Web Audio API) ---
+    const Sound = {
+      ctx: null,
+      seaGain: null,
+      seaFilter: null,
+      sonarCooldown: 0,
+      initialized: false,
+
+      init() {
+        if (this.initialized) return;
+        try {
+          const AudioContext = window.AudioContext || window.webkitAudioContext;
+          if (!AudioContext) return;
+          this.ctx = new AudioContext();
+          this.setupOceanAmbience();
+          this.initialized = true;
+        } catch (e) {
+          // Graceful fallback if Web Audio is unsupported
+        }
+      },
+
+      resume() {
+        if (this.ctx && this.ctx.state === 'suspended') {
+          this.ctx.resume().catch(() => {});
+        }
+      },
+
+      setupOceanAmbience() {
+        if (!this.ctx) return;
+        const bufferSize = this.ctx.sampleRate * 2;
+        const noiseBuffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+        const output = noiseBuffer.getChannelData(0);
+        let b0 = 0, b1 = 0, b2 = 0;
+        for (let i = 0; i < bufferSize; i++) {
+          const white = Math.random() * 2 - 1;
+          b0 = 0.98 * b0 + white * 0.04;
+          b1 = 0.94 * b1 + white * 0.08;
+          b2 = 0.82 * b2 + white * 0.15;
+          output[i] = (b0 + b1 + b2) * 0.28;
+        }
+
+        const whiteNoise = this.ctx.createBufferSource();
+        whiteNoise.buffer = noiseBuffer;
+        whiteNoise.loop = true;
+
+        this.seaFilter = this.ctx.createBiquadFilter();
+        this.seaFilter.type = 'lowpass';
+        this.seaFilter.frequency.setValueAtTime(380, this.ctx.currentTime);
+
+        this.seaGain = this.ctx.createGain();
+        this.seaGain.gain.setValueAtTime(0.04, this.ctx.currentTime);
+
+        whiteNoise.connect(this.seaFilter);
+        this.seaFilter.connect(this.seaGain);
+        this.seaGain.connect(this.ctx.destination);
+        whiteNoise.start(0);
+      },
+
+      playSonarPing() {
+        if (!this.ctx) return;
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(1250, now);
+        osc.frequency.exponentialRampToValueAtTime(1100, now + 0.65);
+
+        gain.gain.setValueAtTime(0.35, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.95);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 1.0);
+      },
+
+      playDepthChargeLaunch() {
+        if (!this.ctx) return;
+        const now = this.ctx.currentTime;
+        // Mortar thump
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(180, now);
+        osc.frequency.exponentialRampToValueAtTime(45, now + 0.18);
+
+        gain.gain.setValueAtTime(0.5, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.22);
+      },
+
+      playUnderwaterDetonation(depthRatio) {
+        if (!this.ctx) return;
+        const now = this.ctx.currentTime;
+        
+        // Low rumble boom
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sawtooth';
+        const startFreq = 95 - depthRatio * 35;
+        osc.frequency.setValueAtTime(startFreq, now);
+        osc.frequency.exponentialRampToValueAtTime(18, now + 0.55);
+
+        const filter = this.ctx.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.setValueAtTime(320 - depthRatio * 160, now);
+
+        gain.gain.setValueAtTime(0.75, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+
+        osc.connect(filter);
+        filter.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.65);
+      },
+
+      playSubHullCrush() {
+        if (!this.ctx) return;
+        const now = this.ctx.currentTime;
+        
+        // Metallic groaning snap
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(320, now);
+        osc.frequency.linearRampToValueAtTime(120, now + 0.25);
+
+        gain.gain.setValueAtTime(0.4, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.35);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.38);
+
+        // Hydrophone echo ping
+        const ping = this.ctx.createOscillator();
+        const pingGain = this.ctx.createGain();
+        ping.type = 'sine';
+        ping.frequency.setValueAtTime(940, now + 0.05);
+        ping.frequency.exponentialRampToValueAtTime(620, now + 0.4);
+
+        pingGain.gain.setValueAtTime(0, now);
+        pingGain.gain.linearRampToValueAtTime(0.25, now + 0.07);
+        pingGain.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
+
+        ping.connect(pingGain);
+        pingGain.connect(this.ctx.destination);
+        ping.start(now + 0.05);
+        ping.stop(now + 0.48);
+      },
+
+      playTorpedoWarning() {
+        if (!this.ctx) return;
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(820, now);
+        gain.gain.setValueAtTime(0.12, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.11);
+      },
+
+      playShipHit() {
+        if (!this.ctx) return;
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(140, now);
+        osc.frequency.linearRampToValueAtTime(30, now + 0.4);
+
+        gain.gain.setValueAtTime(0.8, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.45);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.46);
+      },
+
+      playComboChime(streak) {
+        if (!this.ctx) return;
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        const pitches = [523.25, 587.33, 659.25, 783.99, 880, 1046.5, 1174.66];
+        const p = pitches[Math.min(pitches.length - 1, streak)];
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(p, now);
+
+        gain.gain.setValueAtTime(0.3, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.28);
+      }
+    };
+
+    // --- PSEUDO-RANDOM GENERATOR ---
+    function mulberry32(a) {
+      return function () {
+        let t = a += 0x6D2B79F5;
+        t = Math.imul(t ^ t >>> 15, t | 1);
+        t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+      };
+    }
+    const rng = mulberry32(4242);
+
+    // --- GAME CONSTANTS & STATE ENUMS ---
+    const STATES = {
+      START: 0,
+      PLAYING: 1,
+      GAMEOVER: 2
+    };
+
+    // --- CANVAS & VIEWPORT SETUP ---
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const probe = document.getElementById('safe-inset-probe');
+
+    let W = window.innerWidth;
+    let H = window.innerHeight;
+    let dpr = Math.min(window.devicePixelRatio || 1, 3);
+    let safeTop = 0;
+    let safeBottom = 0;
+
+    let waterLevelY = 0;
+    let oceanHeight = 0;
+
+    function resize() {
+      W = window.innerWidth;
+      H = window.innerHeight;
+      dpr = Math.min(window.devicePixelRatio || 1, 3);
+      canvas.width = Math.floor(W * dpr);
+      canvas.height = Math.floor(H * dpr);
+      canvas.style.width = W + 'px';
+      canvas.style.height = H + 'px';
+
+      const style = getComputedStyle(probe);
+      safeTop = parseFloat(style.paddingTop) || 0;
+      safeBottom = parseFloat(style.paddingBottom) || 0;
+
+      // Surface water line sits ~22% down from top
+      waterLevelY = Math.max(90 + safeTop, H * 0.22);
+      oceanHeight = H - waterLevelY;
+    }
+    window.addEventListener('resize', resize);
+    window.addEventListener('orientationchange', resize);
+    resize();
+
+    // --- LOCAL STORAGE MANAGER ---
+    const STORAGE_KEY = 'sonar_strike_v1_save';
+    function loadSaveData() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return { highScores: [0, 0, 0, 0, 0], maxStreak: 0, subsSunk: 0, bestWave: 1 };
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed.highScores)) parsed.highScores = [0, 0, 0, 0, 0];
+        while (parsed.highScores.length < 5) parsed.highScores.push(0);
+        parsed.highScores = parsed.highScores.slice(0, 5).map(v => Math.max(0, parseInt(v) || 0));
+        parsed.maxStreak = Math.max(0, parseInt(parsed.maxStreak) || 0);
+        parsed.subsSunk = Math.max(0, parseInt(parsed.subsSunk) || 0);
+        parsed.bestWave = Math.max(1, parseInt(parsed.bestWave) || 1);
+        return parsed;
+      } catch (e) {
+        return { highScores: [0, 0, 0, 0, 0], maxStreak: 0, subsSunk: 0, bestWave: 1 };
+      }
+    }
+
+    function saveScore(score, streak, subs, wave) {
+      try {
+        const data = loadSaveData();
+        data.highScores.push(Math.floor(score));
+        data.highScores.sort((a, b) => b - a);
+        data.highScores = data.highScores.slice(0, 5);
+        data.maxStreak = Math.max(data.maxStreak, Math.floor(streak));
+        data.subsSunk = (data.subsSunk || 0) + subs;
+        data.bestWave = Math.max(data.bestWave, wave);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+        return {
+          rank: data.highScores.indexOf(Math.floor(score)) + 1,
+          isHigh: score > 0 && score === data.highScores[0],
+          data
+        };
+      } catch (e) {
+        return { rank: 1, isHigh: true, data: { highScores: [score, 0, 0, 0, 0], maxStreak: streak, subsSunk: subs, bestWave: wave } };
+      }
+    }
+
+    // --- SUBMARINE SPECIES CONFIGURATIONS ---
+    const SUB_TYPES = {
+      SCOUT: {
+        name: 'Type VII Raider',
+        color: '#00f2fe',
+        width: 48,
+        height: 14,
+        speed: 75,
+        hp: 1,
+        score: 150,
+        torpedoCooldown: 4.5,
+        stealth: false,
+        depthMin: 0.15,
+        depthMax: 0.45
+      },
+      HUNTER: {
+        name: 'Type IX Hunter',
+        color: '#ff922b',
+        width: 62,
+        height: 18,
+        speed: 55,
+        hp: 2,
+        score: 300,
+        torpedoCooldown: 3.2,
+        stealth: false,
+        depthMin: 0.35,
+        depthMax: 0.75
+      },
+      PHANTOM: {
+        name: 'Phantom U-Boat',
+        color: '#b197fc',
+        width: 54,
+        height: 16,
+        speed: 90,
+        hp: 1,
+        score: 450,
+        torpedoCooldown: 3.8,
+        stealth: true, // Invisible until sonar ping illuminates it
+        depthMin: 0.5,
+        depthMax: 0.88
+      },
+      DREADNOUGHT: {
+        name: 'Iron Leviathan',
+        color: '#ff6b6b',
+        width: 105,
+        height: 26,
+        speed: 38,
+        hp: 6,
+        score: 1200,
+        torpedoCooldown: 2.0,
+        stealth: false,
+        depthMin: 0.65,
+        depthMax: 0.92
+      }
+    };
+
+    // --- GAME ENGINE STATE ---
+    let gameState = STATES.START;
+    let score = 0;
+    let displayScore = 0;
+    let streak = 0;
+    let streakTimer = 0;
+    let maxGameStreak = 0;
+    let waveSubsSunk = 0;
+    let totalSubsSunk = 0;
+    let currentWave = 1;
+    let targetWaveSubs = 6;
+    let shipLives = 3;
+    let gameTime = 0;
+    let lastTime = 0;
+    let rAFId = null;
+    let screenShake = 0;
+    let slowMo = 1.0;
+    let gameOverSaved = false;
+    let gameOverTimer = 0;
+    let lastSaveResult = null;
+    let onboardingActive = true;
+
+    // --- PARTICLES, POPUPS, BUBBLES ---
+    let particles = [];
+    let popups = [];
+    let bubbles = [];
+    let waterPlumes = [];
+
+    function addParticle(x, y, vx, vy, color, size, life, shape = 'circle') {
+      if (particles.length > 250) particles.shift();
+      particles.push({ x, y, vx, vy, color, size, life, maxLife: life, shape });
+    }
+
+    function addPopup(x, y, text, color, scale = 1, subtitle = '') {
+      popups.push({ x, y, text, color, scale, subtitle, life: 1.0, vy: -35 });
+    }
+
+    function addBubble(x, y, size = 3) {
+      if (bubbles.length > 180) bubbles.shift();
+      bubbles.push({
+        x: x + (Math.random() - 0.5) * 8,
+        y,
+        vy: -25 - Math.random() * 45,
+        vx: (Math.random() - 0.5) * 12,
+        size: size + Math.random() * 3,
+        life: 1.0
+      });
+    }
+
+    function addWaterPlume(x, intensity = 1.0) {
+      waterPlumes.push({
+        x,
+        y: waterLevelY,
+        height: 40 + intensity * 60,
+        progress: 0,
+        speed: 2.8,
+        width: 18 + intensity * 16
+      });
+    }
+
+    // --- SONAR PING WAVE SYSTEM ---
+    let sonarPings = [];
+    let autoSonarTimer = 0;
+
+    function triggerSonarPing(sourceX, sourceY) {
+      sonarPings.push({
+        x: sourceX,
+        y: sourceY,
+        radius: 10,
+        maxRadius: Math.max(W, H) * 0.95,
+        speed: 480,
+        alpha: 1.0
+      });
+      Sound.playSonarPing();
+    }
+
+    // --- WARSHIP HERO CLASS ---
+    const Warship = {
+      x: 0,
+      targetX: 0,
+      width: 76,
+      height: 22,
+      tilt: 0,
+      invulnTimer: 0,
+      reloadTimer: 0,
+      maxReload: 0.38,
+      isChargingDepth: false,
+      chargeDepthMeters: 50, // 30m to 500m
+      maxDepthMeters: 500,
+
+      reset() {
+        this.x = W * 0.5;
+        this.targetX = this.x;
+        this.tilt = 0;
+        this.invulnTimer = 0;
+        this.reloadTimer = 0;
+        this.isChargingDepth = false;
+        this.chargeDepthMeters = 50;
+      },
+
+      update(dt) {
+        // Smooth horizontal steering
+        const dx = this.targetX - this.x;
+        this.tilt = Math.max(-0.15, Math.min(0.15, dx * 0.004));
+        this.x += dx * Math.min(1, dt * 7.5);
+        this.x = Math.max(48, Math.min(W - 48, this.x));
+
+        if (this.invulnTimer > 0) {
+          this.invulnTimer -= dt;
+        }
+
+        if (this.reloadTimer > 0) {
+          this.reloadTimer -= dt;
+        }
+
+        // Depth Fuse dial ramp while holding
+        if (this.isChargingDepth) {
+          const depthRate = 420; // meters per second
+          this.chargeDepthMeters += depthRate * dt;
+          if (this.chargeDepthMeters > this.maxDepthMeters) {
+            this.chargeDepthMeters = this.maxDepthMeters;
+          }
+        }
+
+        // Spawn surface wake particles
+        if (Math.abs(dx) > 10 && Math.random() < 0.3) {
+          addParticle(
+            this.x - Math.sign(dx) * 36,
+            waterLevelY + 4,
+            -Math.sign(dx) * 25,
+            (Math.random() - 0.5) * 8,
+            'rgba(255, 255, 255, 0.65)',
+            3.5,
+            0.35,
+            'circle'
+          );
+        }
+      },
+
+      launchCharge() {
+        if (this.reloadTimer > 0) return;
+        this.reloadTimer = this.maxReload;
+
+        const targetY = waterLevelY + (this.chargeDepthMeters / this.maxDepthMeters) * oceanHeight;
+        DepthCharges.spawn(this.x, waterLevelY + 6, targetY, this.chargeDepthMeters);
+        Sound.playDepthChargeLaunch();
+
+        // Launch recoil kick
+        this.tilt = (Math.random() - 0.5) * 0.22;
+        screenShake = Math.max(screenShake, 4);
+
+        if (onboardingActive) onboardingActive = false;
+      },
+
+      hit() {
+        if (this.invulnTimer > 0) return;
+        this.invulnTimer = 1.8;
+        shipLives--;
+        streak = 0;
+        screenShake = 24;
+        Sound.playShipHit();
+        addWaterPlume(this.x, 1.4);
+        addPopup(this.x, waterLevelY - 35, 'HULL BREACH!', '#ff4757', 1.3, '-1 WARSHIP ARMOR');
+
+        for (let i = 0; i < 25; i++) {
+          const ang = Math.random() * Math.PI * 2;
+          const spd = 40 + Math.random() * 140;
+          addParticle(this.x, waterLevelY, Math.cos(ang) * spd, Math.sin(ang) * spd, '#ff922b', 4, 0.6);
+        }
+
+        if (shipLives <= 0) {
+          triggerGameOver();
+        }
+      }
+    };
+
+    // --- DEPTH CHARGES MANAGER ---
+    const DepthCharges = {
+      list: [],
+
+      spawn(x, startY, targetY, meters) {
+        this.list.push({
+          x,
+          y: startY,
+          targetY,
+          meters: Math.floor(meters),
+          vy: 140 + (meters / 500) * 80, // Sinks faster with high momentum
+          fuseArmTimer: 0.15,
+          active: true
+        });
+      },
+
+      update(dt) {
+        for (let i = this.list.length - 1; i >= 0; i--) {
+          const dc = this.list[i];
+          dc.y += dc.vy * dt;
+          dc.fuseArmTimer -= dt;
+
+          // Trail bubbles
+          if (Math.random() < 0.45) {
+            addBubble(dc.x, dc.y, 2.5);
+          }
+
+          // Detonation condition reached
+          if (dc.y >= dc.targetY) {
+            this.detonate(dc);
+            this.list.splice(i, 1);
+          }
+        }
+      },
+
+      detonate(dc) {
+        const depthRatio = (dc.y - waterLevelY) / oceanHeight;
+        Sound.playUnderwaterDetonation(depthRatio);
+        screenShake = Math.max(screenShake, 14);
+
+        const blastRadius = 68;
+        // Shockwave effect
+        addParticle(dc.x, dc.y, 0, 0, '#00f2fe', blastRadius, 0.38, 'ring');
+        addParticle(dc.x, dc.y, 0, 0, 'rgba(255,255,255,0.9)', blastRadius * 0.6, 0.25, 'ring');
+
+        // Burst bubbles
+        for (let b = 0; b < 14; b++) {
+          addBubble(dc.x + (Math.random() - 0.5) * 30, dc.y + (Math.random() - 0.5) * 20, 4);
+        }
+
+        // If detonated near surface, creates an erupting water plume!
+        if (dc.y - waterLevelY < 90) {
+          addWaterPlume(dc.x, 1.0 - (dc.y - waterLevelY) / 90);
+        }
+
+        // Test collision against Submarines
+        let hitSubCount = 0;
+        for (let s = Submarines.list.length - 1; s >= 0; s--) {
+          const sub = Submarines.list[s];
+          const dist = Math.hypot(sub.x - dc.x, sub.y - dc.y);
+
+          if (dist < blastRadius + sub.width * 0.45) {
+            hitSubCount++;
+            const isDirectHit = dist < 28;
+            sub.takeDamage(1, isDirectHit, dc.meters);
+          }
+        }
+
+        // Intercept incoming torpedoes in the blast radius
+        for (let t = Torpedoes.list.length - 1; t >= 0; t--) {
+          const torp = Torpedoes.list[t];
+          const dist = Math.hypot(torp.x - dc.x, torp.y - dc.y);
+          if (dist < blastRadius) {
+            Torpedoes.destroy(t, true);
+          }
+        }
+
+        if (hitSubCount > 1) {
+          addPopup(dc.x, dc.y - 25, `MULTI-KILL x${hitSubCount}!`, '#ffd43b', 1.25, 'Shockwave Chain Detonation');
+        }
+      },
+
+      draw() {
+        for (let i = 0; i < this.list.length; i++) {
+          const dc = this.list[i];
+          ctx.save();
+          ctx.translate(dc.x, dc.y);
+
+          // Depth charge canister
+          ctx.fillStyle = '#212529';
+          ctx.beginPath();
+          ctx.roundRect(-5, -9, 10, 18, 3);
+          ctx.fill();
+
+          ctx.fillStyle = '#ff922b';
+          ctx.fillRect(-5, -4, 10, 3);
+
+          // Flashing pressure fuse LED
+          ctx.fillStyle = Math.sin(Date.now() * 0.02) > 0 ? '#ff4757' : '#00f2fe';
+          ctx.beginPath();
+          ctx.arc(0, 7, 2, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.restore();
+        }
+      }
+    };
+
+    // --- SUBMARINES MANAGER ---
+    const Submarines = {
+      list: [],
+      spawnTimer: 0,
+
+      reset() {
+        this.list = [];
+        this.spawnTimer = 1.0;
+      },
+
+      spawn() {
+        // Pick sub type based on wave
+        const roll = Math.random();
+        let typeKey = 'SCOUT';
+
+        if (currentWave >= 3 && roll < 0.2) {
+          typeKey = 'DREADNOUGHT';
+        } else if (currentWave >= 2 && roll < 0.5) {
+          typeKey = 'PHANTOM';
+        } else if (roll < 0.8) {
+          typeKey = 'HUNTER';
+        }
+
+        const conf = SUB_TYPES[typeKey];
+        const dir = Math.random() < 0.5 ? 1 : -1;
+        const x = dir === 1 ? -conf.width : W + conf.width;
+        const depthNorm = conf.depthMin + Math.random() * (conf.depthMax - conf.depthMin);
+        const y = waterLevelY + depthNorm * oceanHeight;
+
+        this.list.push({
+          type: typeKey,
+          name: conf.name,
+          color: conf.color,
+          width: conf.width,
+          height: conf.height,
+          speed: (conf.speed + currentWave * 5) * dir,
+          dir: dir,
+          x: x,
+          y: y,
+          hp: conf.hp,
+          maxHp: conf.hp,
+          score: conf.score,
+          torpedoCooldown: 1.5 + Math.random() * conf.torpedoCooldown,
+          stealth: conf.stealth,
+          revealedTimer: conf.stealth ? 0 : 999,
+          propRot: 0,
+          depthMeters: Math.floor(depthNorm * Warship.maxDepthMeters)
+        });
+      },
+
+      update(dt) {
+        this.spawnTimer -= dt;
+        if (this.spawnTimer <= 0 && this.list.length < 3 + Math.min(4, currentWave)) {
+          this.spawn();
+          this.spawnTimer = Math.max(1.8, 3.8 - currentWave * 0.28);
+        }
+
+        for (let i = this.list.length - 1; i >= 0; i--) {
+          const sub = this.list[i];
+          sub.x += sub.speed * dt;
+          sub.propRot += dt * 18;
+
+          if (sub.revealedTimer > 0 && sub.stealth) {
+            sub.revealedTimer -= dt;
+          }
+
+          // Periodic propeller bubbles
+          if (Math.random() < 0.18) {
+            const propX = sub.x - sub.dir * (sub.width * 0.5);
+            addBubble(propX, sub.y, 2);
+          }
+
+          // Torpedo firing logic
+          sub.torpedoCooldown -= dt;
+          if (sub.torpedoCooldown <= 0) {
+            sub.torpedoCooldown = 3.5 + Math.random() * 3.0;
+            // Only fire if near the ship's horizontal patrol lane
+            if (Math.abs(sub.x - Warship.x) < 180) {
+              Torpedoes.spawn(sub.x, sub.y - sub.height * 0.5);
+            }
+          }
+
+          // Remove if swam off screen
+          if ((sub.dir === 1 && sub.x > W + sub.width + 40) || (sub.dir === -1 && sub.x < -sub.width - 40)) {
+            this.list.splice(i, 1);
+          }
+        }
+      },
+
+      draw() {
+        for (let i = 0; i < this.list.length; i++) {
+          const sub = this.list[i];
+          const isVisible = !sub.stealth || sub.revealedTimer > 0;
+          const alpha = sub.stealth ? Math.min(1, sub.revealedTimer / 1.5) : 1.0;
+
+          if (!isVisible) continue;
+
+          ctx.save();
+          ctx.translate(sub.x, sub.y);
+          ctx.globalAlpha = alpha;
+
+          // Submarine Hull Shading
+          const hullGrad = ctx.createLinearGradient(0, -sub.height * 0.5, 0, sub.height * 0.5);
+          hullGrad.addColorStop(0, '#343a40');
+          hullGrad.addColorStop(0.4, sub.color);
+          hullGrad.addColorStop(1, '#111923');
+
+          ctx.fillStyle = hullGrad;
+          ctx.beginPath();
+          ctx.ellipse(0, 0, sub.width * 0.5, sub.height * 0.5, 0, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Conning Tower
+          ctx.fillStyle = '#212529';
+          ctx.beginPath();
+          ctx.roundRect(-sub.width * 0.12, -sub.height * 0.9, sub.width * 0.24, sub.height * 0.6, 2);
+          ctx.fill();
+
+          // Periscope
+          ctx.strokeStyle = '#adb5bd';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(sub.dir * 4, -sub.height * 0.9);
+          ctx.lineTo(sub.dir * 4, -sub.height * 1.3);
+          ctx.lineTo(sub.dir * 8, -sub.height * 1.3);
+          ctx.stroke();
+
+          // Propeller blade spinning
+          const propX = -sub.dir * (sub.width * 0.52);
+          ctx.fillStyle = '#f59f00';
+          ctx.save();
+          ctx.translate(propX, 0);
+          ctx.rotate(sub.propRot);
+          ctx.fillRect(-1.5, -sub.height * 0.4, 3, sub.height * 0.8);
+          ctx.restore();
+
+          // Health Bar if multi-HP
+          if (sub.maxHp > 1) {
+            const barW = sub.width * 0.8;
+            const barH = 4;
+            const barX = -barW * 0.5;
+            const barY = -sub.height * 1.45;
+            ctx.fillStyle = 'rgba(0,0,0,0.6)';
+            ctx.fillRect(barX, barY, barW, barH);
+            ctx.fillStyle = '#ff6b6b';
+            ctx.fillRect(barX, barY, barW * (sub.hp / sub.maxHp), barH);
+          }
+
+          // Depth tag
+          ctx.font = '700 9px sans-serif';
+          ctx.fillStyle = 'rgba(255,255,255,0.7)';
+          ctx.textAlign = 'center';
+          ctx.fillText(`${sub.depthMeters}m`, 0, sub.height * 0.85);
+
+          ctx.restore();
+        }
+      }
+    };
+
+    // Submarine method for damage handling
+    SUB_TYPES.SCOUT; // Ensure reference
+    Object.assign(Object.getPrototypeOf({}), {}); // Safety check
+
+    // Add prototype damage handling function to Submarines
+    Submarines.handleSubDamage = function(sub, idx, dmg, isDirect, detonatedMeters) {
+      sub.hp -= dmg;
+      Sound.playSubHullCrush();
+
+      if (sub.hp <= 0) {
+        // Sub destroyed!
+        this.list.splice(idx, 1);
+        waveSubsSunk++;
+        totalSubsSunk++;
+        streak++;
+        streakTimer = 4.5;
+        maxGameStreak = Math.max(maxGameStreak, streak);
+
+        Sound.playComboChime(streak);
+
+        const streakMult = 1 + streak * 0.35;
+        const directMult = isDirect ? 2.0 : 1.0;
+        const pts = Math.floor(sub.score * streakMult * directMult);
+        score += pts;
+
+        screenShake = isDirect ? 20 : 12;
+        addParticle(sub.x, sub.y, 0, 0, '#00f2fe', sub.width * 1.2, 0.4, 'ring');
+
+        // Oil slick and bubble explosion
+        for (let b = 0; b < 24; b++) {
+          addBubble(sub.x + (Math.random() - 0.5) * sub.width, sub.y, 5);
+        }
+
+        const label = isDirect ? `BULLSEYE! +${pts}` : `SUB CRUSHED! +${pts}`;
+        const subLabel = `${sub.name} • ${detonatedMeters}m Depth`;
+        addPopup(sub.x, sub.y - 20, label, isDirect ? '#ffd43b' : '#00f2fe', isDirect ? 1.3 : 1.05, subLabel);
+
+        // Check wave progression
+        if (waveSubsSunk >= targetWaveSubs) {
+          advanceWave();
+        }
+      } else {
+        // Damaged
+        screenShake = 8;
+        addPopup(sub.x, sub.y - 15, 'HULL CRACKED!', '#ff922b', 0.95);
+        for (let b = 0; b < 8; b++) {
+          addBubble(sub.x, sub.y, 3.5);
+        }
+      }
+    };
+
+    // Bind damage caller to instances
+    function attachSubDamage(sub, index) {
+      sub.takeDamage = function(dmg, isDirect, meters) {
+        Submarines.handleSubDamage(this, Submarines.list.indexOf(this), dmg, isDirect, meters);
+      };
+    }
+
+    // --- TORPEDOES MANAGER ---
+    const Torpedoes = {
+      list: [],
+
+      spawn(x, y) {
+        Sound.playTorpedoWarning();
+        this.list.push({
+          x,
+          y,
+          vy: -110 - currentWave * 8,
+          active: true
+        });
+      },
+
+      update(dt) {
+        for (let i = this.list.length - 1; i >= 0; i--) {
+          const t = this.list[i];
+          t.y += t.vy * dt;
+
+          // Bubbles cavitation trail
+          if (Math.random() < 0.6) {
+            addBubble(t.x, t.y + 10, 2);
+          }
+
+          // Test hit against Warship hull at waterLevelY
+          if (t.y <= waterLevelY + 8) {
+            if (Math.abs(t.x - Warship.x) < Warship.width * 0.5) {
+              Warship.hit();
+              this.destroy(i, false);
+              continue;
+            } else {
+              // Missed and detonated harmlessly on water surface
+              addWaterPlume(t.x, 0.6);
+              this.destroy(i, false);
+              continue;
+            }
+          }
+        }
+      },
+
+      destroy(index, intercepted) {
+        const t = this.list[index];
+        if (!t) return;
+        this.list.splice(index, 1);
+
+        if (intercepted) {
+          score += 100;
+          addPopup(t.x, t.y - 15, 'TORPEDO INTERCEPTED! +100', '#38d9a9', 1.0);
+          Sound.playUnderwaterDetonation(0.2);
+          addParticle(t.x, t.y, 0, 0, '#38d9a9', 42, 0.3, 'ring');
+        }
+      },
+
+      draw() {
+        for (let i = 0; i < this.list.length; i++) {
+          const t = this.list[i];
+          ctx.save();
+          ctx.translate(t.x, t.y);
+
+          // Torpedo casing
+          ctx.fillStyle = '#212529';
+          ctx.beginPath();
+          ctx.roundRect(-3, -10, 6, 20, 2);
+          ctx.fill();
+
+          // Red explosive warhead tip
+          ctx.fillStyle = '#ff4757';
+          ctx.beginPath();
+          ctx.arc(0, -10, 3, Math.PI, 0);
+          ctx.fill();
+
+          // Flashing warning beam
+          ctx.strokeStyle = Math.sin(Date.now() * 0.03) > 0 ? 'rgba(255, 71, 87, 0.8)' : 'rgba(255, 212, 59, 0.8)';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(0, -14);
+          ctx.lineTo(0, -22);
+          ctx.stroke();
+
+          ctx.restore();
+        }
+      }
+    };
+
+    // --- PROCEDURAL WAVE SYSTEM ---
+    function advanceWave() {
+      currentWave++;
+      waveSubsSunk = 0;
+      targetWaveSubs = 6 + currentWave * 2;
+      screenShake = 16;
+      triggerSonarPing(Warship.x, waterLevelY);
+      addPopup(W * 0.5, H * 0.35, `WAVE ${currentWave}: ABYSSAL ESCALATION`, '#ffd43b', 1.4, 'Stealth U-Boats and Deep Dreadnoughts Detected!');
+    }
+
+    function triggerGameOver() {
+      gameState = STATES.GAMEOVER;
+      gameOverTimer = 0;
+      if (!gameOverSaved) {
+        gameOverSaved = true;
+        lastSaveResult = saveScore(score, maxGameStreak, totalSubsSunk, currentWave);
+      }
+    }
+
+    function resetGame() {
+      score = 0;
+      displayScore = 0;
+      streak = 0;
+      streakTimer = 0;
+      maxGameStreak = 0;
+      waveSubsSunk = 0;
+      totalSubsSunk = 0;
+      currentWave = 1;
+      targetWaveSubs = 6;
+      shipLives = 3;
+      gameTime = 0;
+      screenShake = 0;
+      slowMo = 1.0;
+      autoSonarTimer = 0;
+      gameOverSaved = false;
+      gameOverTimer = 0;
+      lastSaveResult = null;
+      particles = [];
+      popups = [];
+      bubbles = [];
+      waterPlumes = [];
+      sonarPings = [];
+      DepthCharges.list = [];
+      Torpedoes.list = [];
+
+      Warship.reset();
+      Submarines.reset();
+      triggerSonarPing(Warship.x, waterLevelY);
+      gameState = STATES.PLAYING;
+    }
+
+    // --- INPUT HANDLING (Touch, Mouse, Keyboard) ---
+    const Input = {
+      isDown: false,
+      pointerX: W * 0.5,
+
+      onDown(x) {
+        Sound.init();
+        Sound.resume();
+
+        if (gameState === STATES.START) {
+          resetGame();
+          return;
+        }
+
+        if (gameState === STATES.GAMEOVER) {
+          if (gameOverTimer > 0.8) {
+            resetGame();
+          }
+          return;
+        }
+
+        if (gameState === STATES.PLAYING) {
+          this.isDown = true;
+          this.pointerX = x;
+          Warship.targetX = x;
+          Warship.isChargingDepth = true;
+          Warship.chargeDepthMeters = 40;
+        }
+      },
+
+      onMove(x) {
+        this.pointerX = x;
+        if (gameState === STATES.PLAYING) {
+          Warship.targetX = x;
+        }
+      },
+
+      onUp() {
+        if (gameState === STATES.PLAYING && this.isDown) {
+          this.isDown = false;
+          Warship.isChargingDepth = false;
+          Warship.launchCharge();
+        }
+      }
+    };
+
+    // Canvas pointer listeners
+    canvas.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      canvas.setPointerCapture(e.pointerId);
+      const rect = canvas.getBoundingClientRect();
+      Input.onDown(e.clientX - rect.left);
+    });
+
+    canvas.addEventListener('pointermove', (e) => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      Input.onMove(e.clientX - rect.left);
+    });
+
+    canvas.addEventListener('pointerup', (e) => {
+      e.preventDefault();
+      Input.onUp();
+    });
+
+    canvas.addEventListener('pointercancel', (e) => {
+      e.preventDefault();
+      Input.onUp();
+    });
+
+    // Keyboard support
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Space' || e.code === 'Enter') {
+        if (!e.repeat) {
+          if (gameState === STATES.START) resetGame();
+          else if (gameState === STATES.GAMEOVER && gameOverTimer > 0.8) resetGame();
+          else if (gameState === STATES.PLAYING && !Input.isDown) {
+            Input.isDown = true;
+            Warship.isChargingDepth = true;
+            Warship.chargeDepthMeters = 40;
+          }
+        }
+      }
+      const step = 32;
+      if (gameState === STATES.PLAYING) {
+        if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') Warship.targetX -= step;
+        if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') Warship.targetX += step;
+      }
+    });
+
+    window.addEventListener('keyup', (e) => {
+      if (e.code === 'Space') {
+        if (gameState === STATES.PLAYING && Input.isDown) {
+          Input.isDown = false;
+          Warship.isChargingDepth = false;
+          Warship.launchCharge();
+        }
+      }
+    });
+
+    // Visibility & blur guards
+    window.addEventListener('blur', () => {
+      Input.isDown = false;
+      Warship.isChargingDepth = false;
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        Input.isDown = false;
+        Warship.isChargingDepth = false;
+      }
+    });
+
+    // --- GRAPHICS RENDERING SYSTEM ---
+    function drawSkyAndEnvironment(dt) {
+      // 1. Stormy Sky Background (Top 22%)
+      const skyGrad = ctx.createLinearGradient(0, 0, 0, waterLevelY);
+      skyGrad.addColorStop(0, '#060d17');
+      skyGrad.addColorStop(0.65, '#0b1d30');
+      skyGrad.addColorStop(1, '#132e4d');
+      ctx.fillStyle = skyGrad;
+      ctx.fillRect(0, 0, W, waterLevelY);
+
+      // Rain streaks in sky
+      ctx.strokeStyle = 'rgba(150, 200, 255, 0.18)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let i = 0; i < 28; i++) {
+        const rx = (gameTime * 380 + i * 45) % W;
+        const ry = (gameTime * 520 + i * 25) % waterLevelY;
+        ctx.moveTo(rx, ry);
+        ctx.lineTo(rx - 8, ry + 16);
+      }
+      ctx.stroke();
+
+      // 2. Abyssal Ocean Column (Bottom 78%)
+      const oceanGrad = ctx.createLinearGradient(0, waterLevelY, 0, H);
+      oceanGrad.addColorStop(0, '#0d324d');
+      oceanGrad.addColorStop(0.2, '#082035');
+      oceanGrad.addColorStop(0.5, '#041324');
+      oceanGrad.addColorStop(0.85, '#020914');
+      oceanGrad.addColorStop(1, '#01050a'); // Abyssal trench
+      ctx.fillStyle = oceanGrad;
+      ctx.fillRect(0, waterLevelY, W, oceanHeight);
+
+      // 3. Volumetric God Rays
+      ctx.save();
+      for (let r = 0; r < 4; r++) {
+        const rayX = W * (0.2 + r * 0.22) + Math.sin(gameTime * 0.5 + r) * 35;
+        const rayGrad = ctx.createLinearGradient(rayX, waterLevelY, rayX + 60, H * 0.7);
+        rayGrad.addColorStop(0, 'rgba(0, 242, 254, 0.08)');
+        rayGrad.addColorStop(1, 'rgba(0, 242, 254, 0)');
+
+        ctx.fillStyle = rayGrad;
+        ctx.beginPath();
+        ctx.moveTo(rayX - 15, waterLevelY);
+        ctx.lineTo(rayX + 15, waterLevelY);
+        ctx.lineTo(rayX + 90, H * 0.75);
+        ctx.lineTo(rayX + 30, H * 0.75);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.restore();
+
+      // 4. Sea Floor Trench Shelf at bottom
+      ctx.fillStyle = '#060a0f';
+      ctx.beginPath();
+      ctx.moveTo(0, H);
+      ctx.lineTo(0, H - 32);
+      ctx.quadraticCurveTo(W * 0.3, H - 45, W * 0.6, H - 28);
+      ctx.quadraticCurveTo(W * 0.85, H - 15, W, H - 38);
+      ctx.lineTo(W, H);
+      ctx.closePath();
+      ctx.fill();
+
+      // 5. Dynamic Sinusoidal Waves at waterLevelY
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(0, waterLevelY);
+      for (let x = 0; x <= W; x += 12) {
+        const wave = Math.sin(x * 0.035 + gameTime * 3.5) * 4.5 + Math.cos(x * 0.018 - gameTime * 2.0) * 3;
+        ctx.lineTo(x, waterLevelY + wave);
+      }
+      ctx.lineTo(W, waterLevelY + 14);
+      ctx.lineTo(0, waterLevelY + 14);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(79, 172, 254, 0.45)';
+      ctx.fill();
+
+      // Wave crest highlights
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.65)';
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function updateAndDrawWaterPlumes(dt) {
+      for (let i = waterPlumes.length - 1; i >= 0; i--) {
+        const p = waterPlumes[i];
+        p.progress += dt * p.speed;
+        if (p.progress >= 1.0) {
+          waterPlumes.splice(i, 1);
+          continue;
+        }
+
+        const h = Math.sin(p.progress * Math.PI) * p.height;
+        ctx.save();
+        ctx.fillStyle = 'rgba(220, 245, 255, 0.75)';
+        ctx.beginPath();
+        ctx.ellipse(p.x, p.y - h * 0.5, p.width * (1 - p.progress * 0.4), h * 0.5, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    function updateAndDrawBubbles(dt) {
+      for (let i = bubbles.length - 1; i >= 0; i--) {
+        const b = bubbles[i];
+        b.y += b.vy * dt;
+        b.x += b.vx * dt;
+
+        if (b.y <= waterLevelY) {
+          bubbles.splice(i, 1);
+          continue;
+        }
+
+        ctx.save();
+        ctx.strokeStyle = 'rgba(150, 230, 255, 0.45)';
+        ctx.fillStyle = 'rgba(200, 245, 255, 0.2)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    function updateAndDrawSonarPings(dt) {
+      for (let i = sonarPings.length - 1; i >= 0; i--) {
+        const ping = sonarPings[i];
+        ping.radius += ping.speed * dt;
+        ping.alpha = Math.max(0, 1 - ping.radius / ping.maxRadius);
+
+        if (ping.alpha <= 0) {
+          sonarPings.splice(i, 1);
+          continue;
+        }
+
+        // Illuminate stealth submarines touching the ping wave
+        for (let s = 0; s < Submarines.list.length; s++) {
+          const sub = Submarines.list[s];
+          const dist = Math.hypot(sub.x - ping.x, sub.y - ping.y);
+          if (Math.abs(dist - ping.radius) < 32 && sub.stealth) {
+            sub.revealedTimer = 4.0; // Revealed for 4 seconds
+          }
+        }
+
+        ctx.save();
+        ctx.strokeStyle = `rgba(0, 242, 254, ${ping.alpha * 0.65})`;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(ping.x, ping.y, ping.radius, 0, Math.PI); // Ocean downward hemisphere
+        ctx.stroke();
+
+        ctx.strokeStyle = `rgba(255, 255, 255, ${ping.alpha * 0.35})`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(ping.x, ping.y, Math.max(0, ping.radius - 8), 0, Math.PI);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    function drawWarship() {
+      ctx.save();
+      ctx.translate(Warship.x, waterLevelY);
+      ctx.rotate(Warship.tilt);
+
+      // Flashing if invincible
+      if (Warship.invulnTimer > 0 && Math.floor(Date.now() / 80) % 2 === 0) {
+        ctx.globalAlpha = 0.45;
+      }
+
+      // Hull
+      const hullGrad = ctx.createLinearGradient(0, -18, 0, 12);
+      hullGrad.addColorStop(0, '#495057');
+      hullGrad.addColorStop(0.6, '#343a40');
+      hullGrad.addColorStop(1, '#1a1e21');
+
+      ctx.fillStyle = hullGrad;
+      ctx.beginPath();
+      ctx.moveTo(-Warship.width * 0.5, -4);
+      ctx.lineTo(Warship.width * 0.42, -4);
+      ctx.lineTo(Warship.width * 0.52, 6);
+      ctx.lineTo(-Warship.width * 0.48, 6);
+      ctx.closePath();
+      ctx.fill();
+
+      // Red Keel stripe below waterline
+      ctx.fillStyle = '#c92a2a';
+      ctx.beginPath();
+      ctx.moveTo(-Warship.width * 0.46, 6);
+      ctx.lineTo(Warship.width * 0.5, 6);
+      ctx.lineTo(Warship.width * 0.44, 12);
+      ctx.lineTo(-Warship.width * 0.42, 12);
+      ctx.closePath();
+      ctx.fill();
+
+      // Superstructure Bridge & Radar Mast
+      ctx.fillStyle = '#6c757d';
+      ctx.fillRect(-14, -18, 28, 14);
+
+      // Bridge Windows
+      ctx.fillStyle = '#00f2fe';
+      ctx.fillRect(-10, -14, 20, 3);
+
+      // Radar Mast
+      ctx.strokeStyle = '#adb5bd';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, -18);
+      ctx.lineTo(0, -32);
+      ctx.moveTo(-7, -26);
+      ctx.lineTo(7, -26);
+      ctx.stroke();
+
+      // Spinning Radar Dish
+      const dishW = Math.cos(gameTime * 4.5) * 8;
+      ctx.beginPath();
+      ctx.moveTo(-dishW, -32);
+      ctx.lineTo(dishW, -32);
+      ctx.stroke();
+
+      // Dual Depth Charge Launchers on Stern
+      ctx.fillStyle = '#212529';
+      ctx.fillRect(-Warship.width * 0.42, -9, 8, 5);
+      ctx.fillRect(-Warship.width * 0.32, -9, 8, 5);
+
+      ctx.restore();
+
+      // --- Depth Charge Targeting Reticle Beam ---
+      if (Warship.isChargingDepth) {
+        const targetY = waterLevelY + (Warship.chargeDepthMeters / Warship.maxDepthMeters) * oceanHeight;
+
+        ctx.save();
+        // Guide Line
+        ctx.strokeStyle = 'rgba(0, 242, 254, 0.4)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 6]);
+        ctx.beginPath();
+        ctx.moveTo(Warship.x, waterLevelY + 12);
+        ctx.lineTo(Warship.x, targetY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Depth Fuse Reticle
+        ctx.strokeStyle = '#00f2fe';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(Warship.x, targetY, 24, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Crosshairs
+        ctx.beginPath();
+        ctx.moveTo(Warship.x - 30, targetY);
+        ctx.lineTo(Warship.x - 14, targetY);
+        ctx.moveTo(Warship.x + 14, targetY);
+        ctx.lineTo(Warship.x + 30, targetY);
+        ctx.moveTo(Warship.x, targetY - 30);
+        ctx.lineTo(Warship.x, targetY - 14);
+        ctx.moveTo(Warship.x, targetY + 14);
+        ctx.lineTo(Warship.x, targetY + 30);
+        ctx.stroke();
+
+        // Depth Readout
+        ctx.font = '800 12px sans-serif';
+        ctx.fillStyle = '#ffd43b';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${Math.floor(Warship.chargeDepthMeters)}m FUSE`, Warship.x, targetY - 34);
+
+        ctx.restore();
+      }
+    }
+
+    function updateAndDrawParticles(dt) {
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.life -= dt;
+        if (p.life <= 0) {
+          particles.splice(i, 1);
+          continue;
+        }
+
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        const alpha = Math.max(0, p.life / p.maxLife);
+
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        if (p.shape === 'ring') {
+          const currentRadius = p.size * (1 + (1 - alpha) * 1.8);
+          ctx.strokeStyle = p.color;
+          ctx.lineWidth = 3.5 * alpha;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, currentRadius, 0, Math.PI * 2);
+          ctx.stroke();
+        } else {
+          ctx.fillStyle = p.color;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * alpha, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+    }
+
+    function updateAndDrawPopups(dt) {
+      for (let i = popups.length - 1; i >= 0; i--) {
+        const pop = popups[i];
+        pop.life -= dt;
+        if (pop.life <= 0) {
+          popups.splice(i, 1);
+          continue;
+        }
+        pop.y += pop.vy * dt;
+        const alpha = Math.min(1, pop.life * 1.6);
+
+        ctx.save();
+        ctx.textAlign = 'center';
+        ctx.globalAlpha = alpha;
+
+        const fontSize = Math.floor(19 * pop.scale);
+        ctx.font = `900 ${fontSize}px sans-serif`;
+        ctx.fillStyle = '#020617';
+        ctx.fillText(pop.text, pop.x + 1, pop.y + 1);
+        ctx.fillStyle = pop.color;
+        ctx.fillText(pop.text, pop.x, pop.y);
+
+        if (pop.subtitle) {
+          const subSize = Math.max(10, Math.floor(11 * pop.scale));
+          ctx.font = `700 ${subSize}px sans-serif`;
+          ctx.fillStyle = '#ffffff';
+          ctx.fillText(pop.subtitle, pop.x, pop.y + fontSize * 0.85);
+        }
+        ctx.restore();
+      }
+    }
+
+    // --- HUD AND GAUGES ---
+    function drawHUD() {
+      const pad = 16;
+      const topY = safeTop + pad;
+
+      ctx.save();
+      // 1. Score Readout
+      ctx.textAlign = 'left';
+      ctx.font = '900 24px sans-serif';
+      ctx.fillStyle = '#ffffff';
+      displayScore += (score - displayScore) * 0.16;
+      ctx.fillText(Math.floor(displayScore).toLocaleString(), pad, topY + 20);
+
+      ctx.font = '700 11px sans-serif';
+      ctx.fillStyle = 'var(--text-sub)';
+      ctx.fillText('NAVAL SCORE', pad, topY + 34);
+
+      // Streak Multiplier Pill
+      if (streak > 1) {
+        const pillX = pad + 120;
+        const pillY = topY + 4;
+        ctx.fillStyle = streak >= 5 ? 'rgba(255, 146, 43, 0.95)' : 'rgba(0, 242, 254, 0.85)';
+        ctx.beginPath();
+        ctx.roundRect(pillX, pillY, 78, 25, 12);
+        ctx.fill();
+
+        ctx.fillStyle = '#030a14';
+        ctx.font = '900 12px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${streak}X COMBO`, pillX + 39, pillY + 17);
+      }
+
+      // 2. Warship Armor (Lives)
+      const rightX = W - pad;
+      ctx.textAlign = 'right';
+      for (let h = 0; h < 3; h++) {
+        const shieldX = rightX - h * 24 - 10;
+        const shieldY = topY + 14;
+        ctx.font = '16px sans-serif';
+        ctx.fillStyle = h < shipLives ? '#00f2fe' : 'rgba(255,255,255,0.2)';
+        ctx.fillText('🛡', shieldX, shieldY);
+      }
+
+      // Wave Tracker
+      ctx.font = '700 11px sans-serif';
+      ctx.fillStyle = 'var(--text-sub)';
+      ctx.fillText(`WAVE ${currentWave} (${waveSubsSunk}/${targetWaveSubs})`, rightX, topY + 34);
+
+      // 3. Ocean Depth Gauge on Left Edge
+      const gaugeX = 12;
+      const gaugeY = waterLevelY + 20;
+      const gaugeH = oceanHeight - 40;
+
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(gaugeX, gaugeY);
+      ctx.lineTo(gaugeX, gaugeY + gaugeH);
+      ctx.stroke();
+
+      // Depth ticks (100m, 250m, 500m)
+      const depths = [100, 250, 500];
+      ctx.font = '700 9px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+      for (let d = 0; d < depths.length; d++) {
+        const dy = gaugeY + (depths[d] / 500) * gaugeH;
+        ctx.beginPath();
+        ctx.moveTo(gaugeX, dy);
+        ctx.lineTo(gaugeX + 6, dy);
+        ctx.stroke();
+        ctx.fillText(`${depths[d]}m`, gaugeX + 9, dy + 3);
+      }
+
+      // 4. Onboarding Hint (Fades after first drop)
+      if (onboardingActive) {
+        ctx.textAlign = 'center';
+        const boxW = Math.min(320, W - 40);
+        const boxH = 52;
+        const boxX = (W - boxW) * 0.5;
+        const boxY = H - safeBottom - 75;
+
+        ctx.fillStyle = 'var(--hud-panel)';
+        ctx.beginPath();
+        ctx.roundRect(boxX, boxY, boxW, boxH, 12);
+        ctx.fill();
+        ctx.strokeStyle = 'var(--cyan-bright)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '700 13px sans-serif';
+        ctx.fillText('DRAG to Steer • HOLD to Set Depth Fuse', W * 0.5, boxY + 22);
+        ctx.font = '600 11px sans-serif';
+        ctx.fillStyle = 'var(--gold)';
+        ctx.fillText('RELEASE to bomb submarines & intercept torpedoes!', W * 0.5, boxY + 40);
+      }
+
+      ctx.restore();
+    }
+
+    // --- OVERLAYS: START AND GAMEOVER SCREENS ---
+    function drawStartScreen() {
+      ctx.save();
+      ctx.fillStyle = 'rgba(3, 10, 20, 0.88)';
+      ctx.fillRect(0, 0, W, H);
+
+      const cx = W * 0.5;
+      const cy = H * 0.44;
+
+      ctx.textAlign = 'center';
+      ctx.font = '900 38px sans-serif';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText('SONAR', cx, cy - 65);
+      ctx.fillStyle = 'var(--cyan-bright)';
+      ctx.fillText('STRIKE', cx, cy - 25);
+
+      ctx.font = '600 14px sans-serif';
+      ctx.fillStyle = '#94a3b8';
+      ctx.fillText('Abyssal Submarine Warfare & Interception', cx, cy + 8);
+
+      // Briefing panel
+      const badgeW = Math.min(340, W - 48);
+      ctx.fillStyle = 'rgba(14, 28, 48, 0.8)';
+      ctx.beginPath();
+      ctx.roundRect(cx - badgeW * 0.5, cy + 32, badgeW, 88, 14);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(79, 172, 254, 0.25)';
+      ctx.stroke();
+
+      ctx.font = '700 13px sans-serif';
+      ctx.fillStyle = '#f8fafc';
+      ctx.fillText('1. DRAG warship to steer across surface', cx, cy + 56);
+      ctx.fillText('2. HOLD screen to dial hydrostatic depth fuse', cx, cy + 78);
+      ctx.fillStyle = 'var(--gold)';
+      ctx.fillText('3. RELEASE to detonate subs & incoming torpedoes!', cx, cy + 100);
+
+      // Play button
+      const pulse = 1 + Math.sin(Date.now() * 0.006) * 0.05;
+      ctx.save();
+      ctx.translate(cx, cy + 165);
+      ctx.scale(pulse, pulse);
+      const btnW = 200;
+      const btnH = 48;
+      ctx.fillStyle = 'var(--cyan-bright)';
+      ctx.beginPath();
+      ctx.roundRect(-btnW * 0.5, -btnH * 0.5, btnW, btnH, 24);
+      ctx.fill();
+
+      ctx.fillStyle = '#030a14';
+      ctx.font = '900 16px sans-serif';
+      ctx.fillText('COMMENCE PATROL', 0, 6);
+      ctx.restore();
+
+      const save = loadSaveData();
+      if (save.highScores[0] > 0) {
+        ctx.font = '700 13px sans-serif';
+        ctx.fillStyle = '#64748b';
+        ctx.fillText(`RECORD SCORE: ${save.highScores[0].toLocaleString()}  •  SUBS SUNK: ${save.subsSunk}`, cx, cy + 225);
+      }
+
+      ctx.restore();
+    }
+
+    function drawGameOverScreen(dt) {
+      gameOverTimer += dt;
+      ctx.save();
+      ctx.fillStyle = 'rgba(3, 10, 20, 0.92)';
+      ctx.fillRect(0, 0, W, H);
+
+      const cx = W * 0.5;
+      const cy = H * 0.42;
+
+      ctx.textAlign = 'center';
+      ctx.font = '900 32px sans-serif';
+      ctx.fillStyle = 'var(--crimson)';
+      ctx.fillText('WARSHIP SUNK', cx, cy - 90);
+
+      const panelW = Math.min(350, W - 40);
+      const panelH = 205;
+      ctx.fillStyle = 'rgba(10, 22, 38, 0.9)';
+      ctx.beginPath();
+      ctx.roundRect(cx - panelW * 0.5, cy - 70, panelW, panelH, 16);
+      ctx.fill();
+      ctx.strokeStyle = lastSaveResult && lastSaveResult.isHigh ? 'var(--gold)' : 'var(--hud-border)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      if (lastSaveResult && lastSaveResult.isHigh) {
+        ctx.font = '900 12px sans-serif';
+        ctx.fillStyle = 'var(--gold)';
+        ctx.fillText('★ NEW NAVAL HIGH SCORE! ★', cx, cy - 48);
+      }
+
+      ctx.font = '900 36px sans-serif';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(Math.floor(score).toLocaleString(), cx, cy - 10);
+
+      ctx.font = '700 12px sans-serif';
+      ctx.fillStyle = 'var(--text-sub)';
+      ctx.fillText('FINAL PATROL SCORE', cx, cy + 10);
+
+      const save = lastSaveResult ? lastSaveResult.data : loadSaveData();
+      ctx.font = '600 12px sans-serif';
+      ctx.fillStyle = '#cbd5e1';
+      ctx.fillText(`1st: ${save.highScores[0].toLocaleString()}    2nd: ${save.highScores[1].toLocaleString()}    3rd: ${save.highScores[2].toLocaleString()}`, cx, cy + 42);
+
+      ctx.font = '600 12px sans-serif';
+      ctx.fillStyle = '#64748b';
+      ctx.fillText(`Reached Wave ${currentWave}  •  Top Streak: ${save.maxStreak}x`, cx, cy + 64);
+
+      if (gameOverTimer > 0.8) {
+        const pulse = 1 + Math.sin(Date.now() * 0.007) * 0.04;
+        ctx.save();
+        ctx.translate(cx, cy + 165);
+        ctx.scale(pulse, pulse);
+        const btnW = 190;
+        const btnH = 46;
+        ctx.fillStyle = 'var(--cyan-bright)';
+        ctx.beginPath();
+        ctx.roundRect(-btnW * 0.5, -btnH * 0.5, btnW, btnH, 23);
+        ctx.fill();
+
+        ctx.fillStyle = '#030a14';
+        ctx.font = '900 15px sans-serif';
+        ctx.fillText('ENGAGE AGAIN', 0, 5);
+        ctx.restore();
+      }
+
+      ctx.restore();
+    }
+
+    // --- MAIN ENGINE LOOP ---
+    function loop(timestamp) {
+      if (!lastTime) lastTime = timestamp;
+      let dt = (timestamp - lastTime) / 1000;
+      lastTime = timestamp;
+
+      dt = Math.min(0.04, Math.max(0.001, dt));
+      dt *= slowMo;
+      gameTime += dt;
+
+      // Screen shake decay
+      if (screenShake > 0) {
+        screenShake = Math.max(0, screenShake - dt * 28);
+      }
+
+      // Streak timer decay
+      if (streakTimer > 0) {
+        streakTimer = Math.max(0, streakTimer - dt);
+        if (streakTimer <= 0) streak = 0;
+      }
+
+      // Auto Sonar Ping every 4.2 seconds
+      autoSonarTimer += dt;
+      if (autoSonarTimer >= 4.2 && gameState === STATES.PLAYING) {
+        autoSonarTimer = 0;
+        triggerSonarPing(Warship.x, waterLevelY);
+      }
+
+      // Transform with screen shake
+      ctx.save();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      if (screenShake > 0) {
+        const sx = (Math.random() - 0.5) * screenShake;
+        const sy = (Math.random() - 0.5) * screenShake;
+        ctx.translate(sx, sy);
+      }
+
+      // Render world layers
+      drawSkyAndEnvironment(dt);
+      updateAndDrawSonarPings(dt);
+      updateAndDrawBubbles(dt);
+
+      // Attach prototype helper for sub instances
+      for (let s = 0; s < Submarines.list.length; s++) {
+        attachSubDamage(Submarines.list[s], s);
+      }
+
+      if (gameState === STATES.PLAYING) {
+        Submarines.update(dt);
+        DepthCharges.update(dt);
+        Torpedoes.update(dt);
+        Warship.update(dt);
+
+        Submarines.draw();
+        DepthCharges.draw();
+        Torpedoes.draw();
+        drawWarship();
+
+        updateAndDrawWaterPlumes(dt);
+        updateAndDrawParticles(dt);
+        updateAndDrawPopups(dt);
+        drawHUD();
+      } else if (gameState === STATES.START) {
+        drawWarship();
+        drawStartScreen();
+      } else if (gameState === STATES.GAMEOVER) {
+        Submarines.update(dt * 0.3);
+        Submarines.draw();
+        updateAndDrawParticles(dt);
+        updateAndDrawPopups(dt);
+        drawGameOverScreen(dt);
+      }
+
+      ctx.restore();
+      rAFId = requestAnimationFrame(loop);
+    }
+
+    function startLoop() {
+      if (rAFId) cancelAnimationFrame(rAFId);
+      lastTime = 0;
+      rAFId = requestAnimationFrame(loop);
+    }
+
+    function stopLoop() {
+      if (rAFId) {
+        cancelAnimationFrame(rAFId);
+        rAFId = null;
+      }
+    }
+
+    // Initialize state
+    Warship.reset();
+    startLoop();
+
+  })();
+  </script>
+</body>
+</html>

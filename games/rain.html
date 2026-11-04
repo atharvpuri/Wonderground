@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Neon Rain</title>
+<style>
+:root{--bg:#02050b;--neon-blue:#38f9d7;--neon-pink:#ff0844;--neon-gold:#ffd200;--text:#f0f6fc}
+@media(prefers-color-scheme:dark){:root{--bg:#02050b}}
+:root[data-theme="tokyo"]{--neon-blue:#00f2fe;--neon-pink:#f72585}
+html,body{margin:0;height:100%;overflow:hidden;overscroll-behavior:none;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;background:var(--bg)}
+canvas{position:fixed;inset:0;width:100%;height:100%;touch-action:none;display:block}
+#probe{position:fixed;top:0;left:0;visibility:hidden;padding-top:env(safe-area-inset-top,0px)}
+</style>
+</head>
+<body>
+<div id="probe"></div>
+<canvas id="c"></canvas>
+<script>
+(() => {
+'use strict';
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), probe = document.getElementById('probe');
+const ST = { START: 0, PLAY: 1, OVER: 2 };
+const TAU = Math.PI * 2;
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const rr = (a, b) => a + Math.random() * (b - a);
+
+/* ---------- storage ---------- */
+const KEY = 'neonRain.top5';
+const loadTop = () => { try { const a = JSON.parse(localStorage.getItem(KEY) || '[]'); return Array.isArray(a) ? a.filter(n => typeof n === 'number' && isFinite(n)).slice(0, 5) : []; } catch (e) { return []; } };
+let top5 = loadTop();
+function saveTop(s) { const a = top5.slice(); a.push(Math.floor(s)); a.sort((x, y) => y - x); top5 = a.slice(0, 5); try { localStorage.setItem(KEY, JSON.stringify(top5)); } catch (e) {} return top5.indexOf(Math.floor(s)); }
+
+/* ---------- audio engine (Web Audio API) ---------- */
+let AC = null, rainGain = null, rainFilter = null;
+function audio() {
+  if (!AC) {
+    try {
+      const C = window.AudioContext || window.webkitAudioContext;
+      if (!C) return null;
+      AC = new C();
+      setupRainAmbience();
+    } catch (e) { AC = null; }
+  }
+  if (AC && AC.state === 'suspended') AC.resume();
+  return AC;
+}
+function setupRainAmbience() {
+  if (!AC) return;
+  const bufSize = AC.sampleRate * 2;
+  const buf = AC.createBuffer(1, bufSize, AC.sampleRate);
+  const d = buf.getChannelData(0);
+  let b0 = 0, b1 = 0;
+  for (let i = 0; i < bufSize; i++) {
+    const white = Math.random() * 2 - 1;
+    b0 = 0.98 * b0 + white * 0.04;
+    b1 = 0.94 * b1 + white * 0.08;
+    d[i] = (b0 + b1) * 0.25;
+  }
+  const noise = AC.createBufferSource();
+  noise.buffer = buf;
+  noise.loop = true;
+  rainFilter = AC.createBiquadFilter();
+  rainFilter.type = 'lowpass';
+  rainFilter.frequency.value = 450;
+  rainGain = AC.createGain();
+  rainGain.gain.value = 0.04;
+  noise.connect(rainFilter);
+  rainFilter.connect(rainGain);
+  rainGain.connect(AC.destination);
+  noise.start();
+}
+function setRainIntensity(v) {
+  if (!AC || !rainGain || !rainFilter) return;
+  const now = AC.currentTime;
+  rainFilter.frequency.setTargetAtTime(350 + v * 1200, now, 0.1);
+  rainGain.gain.setTargetAtTime(0.03 + v * 0.09, now, 0.1);
+}
+function tone(type, f0, f1, dur, vol, delay) {
+  const a = audio(); if (!a) return;
+  try {
+    const o = a.createOscillator(), g = a.createGain(), t = a.currentTime + (delay || 0);
+    o.type = type;
+    o.frequency.setValueAtTime(f0, t);
+    o.frequency.exponentialRampToValueAtTime(Math.max(15, f1), t + dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(a.destination);
+    o.start(t); o.stop(t + dur + 0.03);
+  } catch (e) {}
+}
+const sfx = {
+  merge(combo) {
+    const scale = [392, 440, 523, 587, 659, 784, 880, 1046];
+    const f = scale[Math.min(combo, scale.length - 1)];
+    tone('sine', f, f * 1.5, 0.14, 0.16);
+    tone('triangle', f * 2, f * 2.5, 0.1, 0.08, 0.02);
+  },
+  gold() {
+    tone('sine', 880, 1760, 0.24, 0.2);
+    tone('triangle', 1320, 2640, 0.28, 0.14, 0.04);
+  },
+  wiperSqueak() {
+    tone('sawtooth', 340, 180, 0.22, 0.06);
+    tone('sine', 120, 80, 0.25, 0.08);
+  },
+  hit() {
+    tone('sawtooth', 140, 30, 0.45, 0.25);
+    tone('square', 70, 20, 0.4, 0.18);
+  },
+  booster() {
+    tone('sine', 280, 840, 0.35, 0.15);
+  },
+  frenzy() {
+    [523, 659, 784, 1046, 1318].forEach((f, i) => tone('triangle', f, f * 1.2, 0.28, 0.1, i * 0.06));
+  }
+};
+
+/* ---------- canvas & layout ---------- */
+let W = 0, H = 0, dpr = 1, safe = 0;
+function resize() {
+  dpr = Math.min(3, window.devicePixelRatio || 1);
+  W = innerWidth; H = innerHeight;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  cv.style.width = W + 'px';
+  cv.style.height = H + 'px';
+  safe = probe.offsetHeight || 0;
+}
+addEventListener('resize', resize);
+addEventListener('orientationchange', () => setTimeout(resize, 140));
+
+/* ---------- background city neon bokeh ---------- */
+const bokeh = Array.from({ length: 32 }, () => ({
+  x: Math.random(), y: Math.random(), r: rr(18, 55),
+  col: ['#ff0844', '#00f2fe', '#ffd200', '#7928ca', '#38ef7d'][Math.floor(Math.random() * 5)],
+  alpha: rr(0.15, 0.45), spd: rr(0.015, 0.045)
+}));
+
+/* ---------- state machine & game entities ---------- */
+let state = ST.START, raf = 0, last = 0, overT = 0;
+let G = null;
+const inp = { x: 0, y: 0, tx: 0, ty: 0, down: false, ptrId: null, keys: {} };
+
+function resetGame() {
+  G = {
+    t: 0, score: 0, combo: 0, comboT: 0, bestCombo: 0, lives: 3,
+    p: { x: W * 0.5, y: H * 0.72, r: 18, baseR: 18, mass: 1, vx: 0, vy: 0, wx: 1, wy: 1, invuln: 0, tail: [] },
+    drops: [], boosts: [], slicks: [], parts: [], pops: [],
+    wiper: { ang: -0.65, dir: 1, timer: 0, speed: 2.1, active: true },
+    frenzy: 0, frenzyT: 0, shake: 0, spawnT: 0, hint: 1, rank: -1
+  };
+  inp.x = inp.tx = G.p.x;
+  inp.y = inp.ty = G.p.y;
+}
+
+function spawnDrop() {
+  const isGold = Math.random() < 0.12;
+  G.drops.push({
+    x: rr(W * 0.08, W * 0.92),
+    y: -25,
+    r: isGold ? rr(12, 16) : rr(7, 13),
+    vy: rr(120, 260) + G.t * 3.5,
+    gold: isGold,
+    tail: []
+  });
+}
+function spawnPatch() {
+  const isSlick = Math.random() < 0.45;
+  const x = rr(W * 0.15, W * 0.85);
+  if (isSlick) {
+    G.slicks.push({ x, y: -45, r: rr(32, 50), vy: rr(110, 180), hue: Math.random() * 360 });
+  } else {
+    G.boosts.push({ x, y: -45, w: rr(36, 54), h: rr(55, 80), vy: rr(130, 200) });
+  }
+}
+
+resetGame();
+
+/* ---------- core loop ---------- */
+function stopLoop() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+function startLoop() { stopLoop(); last = performance.now(); raf = requestAnimationFrame(frame); }
+function frame(now) {
+  raf = requestAnimationFrame(frame);
+  let dt = Math.min(0.033, Math.max(0.001, (now - last) / 1000));
+  last = now;
+  update(dt);
+  draw(now);
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { stopLoop(); }
+  else { startLoop(); }
+});
+function startGame() {
+  stopLoop();
+  resetGame();
+  state = ST.PLAY;
+  audio();
+  startLoop();
+}
+
+/* ---------- particle & text juice ---------- */
+const pop = (t, col, x, y, scale = 1) => G.pops.push({ t, col, x, y, l: 1.0, scale });
+function burst(x, y, n, cols, sp = 160) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * TAU, s = sp * (0.3 + Math.random());
+    if (G.parts.length < 240) G.parts.push({
+      x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+      l: 0.35 + Math.random() * 0.4, max: 0.75, col: cols[i % cols.length], r: rr(2, 4.5)
+    });
+  }
+}
+
+/* ---------- update logic ---------- */
+function update(dt) {
+  const g = G;
+  g.t += dt;
+  g.shake = Math.max(0, g.shake - dt * 2.8);
+  setRainIntensity(clamp(g.t / 60, 0, 1));
+
+  // Background bokeh drift (simulating car cruising through neon city)
+  for (const b of bokeh) {
+    b.y += b.spd * dt * 2.5;
+    if (b.y > 1.2) { b.y = -0.2; b.x = Math.random(); }
+  }
+
+  // Floating particles & popups
+  for (let i = g.parts.length - 1; i >= 0; i--) {
+    const q = g.parts[i]; q.l -= dt;
+    q.x += q.vx * dt; q.y += q.vy * dt;
+    q.vx *= 0.94; q.vy *= 0.94;
+    if (q.l <= 0) g.parts.splice(i, 1);
+  }
+  for (let i = g.pops.length - 1; i >= 0; i--) {
+    const q = g.pops[i]; q.l -= dt;
+    q.y -= dt * 34;
+    if (q.l <= 0) g.pops.splice(i, 1);
+  }
+
+  if (state === ST.START) {
+    g.p.x = W * 0.5 + Math.sin(g.t * 2) * (W * 0.25);
+    g.p.y = H * 0.72 + Math.cos(g.t * 3) * 15;
+    return;
+  }
+  if (state === ST.OVER) {
+    overT += dt;
+    return;
+  }
+
+  const p = g.p;
+  if (p.invuln > 0) p.invuln -= dt;
+
+  // Combo timer decay
+  if (g.comboT > 0) {
+    g.comboT -= dt;
+    if (g.comboT <= 0) g.combo = 0;
+  }
+  // Frenzy timer decay
+  if (g.frenzyT > 0) {
+    g.frenzyT -= dt;
+    if (g.frenzyT <= 0) g.frenzy = 0;
+  }
+
+  // Keyboard navigation fallback
+  const kx = (inp.keys.r ? 1 : 0) - (inp.keys.l ? 1 : 0);
+  const ky = (inp.keys.d ? 1 : 0) - (inp.keys.u ? 1 : 0);
+  if (kx || ky) {
+    inp.tx = clamp(inp.tx + kx * 420 * dt, p.r + 10, W - p.r - 10);
+    inp.ty = clamp(inp.ty + ky * 420 * dt, safe + 40, H - p.r - 20);
+  }
+
+  // Smooth player movement with fluid inertia & surface drag
+  const dx = inp.tx - p.x;
+  const dy = inp.ty - p.y;
+  p.vx = dx * 11;
+  p.vy = dy * 11;
+  p.x += p.vx * dt;
+  p.y += p.vy * dt;
+  p.x = clamp(p.x, p.r + 8, W - p.r - 8);
+  p.y = clamp(p.y, safe + 30, H - p.r - 14);
+
+  // Fluid squish & wobble physics
+  const speed = Math.hypot(p.vx, p.vy);
+  const targetWx = 1 + clamp(p.vx / 700, -0.4, 0.4);
+  const targetWy = 1 + clamp(p.vy / 700, -0.4, 0.4);
+  p.wx = lerp(p.wx, targetWx, dt * 14);
+  p.wy = lerp(p.wy, targetWy, dt * 14);
+
+  // Player tail streak
+  if (g.t % 0.04 < dt) {
+    p.tail.unshift({ x: p.x, y: p.y, r: p.r * 0.7, a: 0.6 });
+    if (p.tail.length > 9) p.tail.pop();
+  }
+  for (const t of p.tail) t.a -= dt * 1.6;
+
+  // Mass / Radius dynamic scaling
+  p.r = lerp(p.r, p.baseR + Math.sqrt(p.mass) * 4.2, dt * 6);
+  p.mass = Math.max(1, p.mass - dt * 0.18); // Gentle natural mass decay
+
+  // Spawning droplets & hazards
+  g.spawnT -= dt;
+  if (g.spawnT <= 0) {
+    spawnDrop();
+    if (g.frenzy) spawnDrop();
+    if (Math.random() < 0.28) spawnPatch();
+    g.spawnT = lerp(0.38, 0.18, clamp(g.t / 70, 0, 1));
+  }
+
+  // Move & merge incoming droplets
+  for (let i = g.drops.length - 1; i >= 0; i--) {
+    const d = g.drops[i];
+    d.y += d.vy * dt;
+
+    // Proximity gravitational pull toward player
+    const dist = Math.hypot(d.x - p.x, d.y - p.y);
+    const attractR = p.r * 2.8;
+    if (dist < attractR && dist > 1) {
+      d.x += ((p.x - d.x) / dist) * 220 * dt;
+      d.y += ((p.y - d.y) / dist) * 220 * dt;
+    }
+
+    // Droplet merge collision!
+    if (dist < p.r + d.r) {
+      g.combo++;
+      g.comboT = 3.2;
+      g.bestCombo = Math.max(g.bestCombo, g.combo);
+      const mult = 1 + g.combo * 0.25;
+      const pts = Math.floor((d.gold ? 250 : 60) * mult * (g.frenzy ? 3 : 1));
+      g.score += pts;
+      p.mass = Math.min(22, p.mass + (d.gold ? 3.5 : 1.2));
+
+      if (d.gold) {
+        sfx.gold();
+        pop('GOLDEN DEW! +' + pts, '#ffd200', p.x, p.y - 30, 1.3);
+        burst(p.x, p.y, 14, ['#ffd200', '#ffffff', '#ff0844'], 190);
+      } else {
+        sfx.merge(g.combo);
+        pop('+' + pts + (g.combo > 1 ? '  x' + mult.toFixed(1) : ''), '#38f9d7', p.x, p.y - 25);
+        burst(d.x, d.y, 6, ['#38f9d7', '#ffffff'], 110);
+      }
+
+      // Check frenzy activation
+      if (g.combo >= 8 && !g.frenzy) {
+        g.frenzy = 1;
+        g.frenzyT = 7.0;
+        sfx.frenzy();
+        pop('AQUAPLANE FRENZY (3X)!', '#ff0844', p.x, p.y - 50, 1.45);
+        burst(p.x, p.y, 25, ['#ff0844', '#ffd200', '#38f9d7'], 240);
+        g.shake = 0.6;
+      }
+
+      g.drops.splice(i, 1);
+      continue;
+    }
+
+    // Clean passed drops
+    if (d.y > H + 40) g.drops.splice(i, 1);
+  }
+
+  // Update Hydrophobic Boosters
+  for (let i = g.boosts.length - 1; i >= 0; i--) {
+    const b = g.boosts[i];
+    b.y += b.vy * dt;
+    if (Math.abs(b.x - p.x) < b.w * 0.5 + p.r && Math.abs(b.y - p.y) < b.h * 0.5 + p.r) {
+      sfx.booster();
+      g.score += 80;
+      pop('HYDRO SLIDE! +80', '#00f2fe', p.x, p.y - 25);
+      p.mass = Math.min(22, p.mass + 1.5);
+      burst(p.x, p.y, 8, ['#00f2fe', '#ffffff'], 160);
+      g.boosts.splice(i, 1);
+      continue;
+    }
+    if (b.y > H + 60) g.boosts.splice(i, 1);
+  }
+
+  // Update Oil Slicks
+  for (let i = g.slicks.length - 1; i >= 0; i--) {
+    const s = g.slicks[i];
+    s.y += s.vy * dt;
+    if (Math.hypot(s.x - p.x, s.y - p.y) < s.r + p.r * 0.7) {
+      // Grease contamination slows and scuffs mass
+      g.combo = 0;
+      p.mass = Math.max(1, p.mass - dt * 6);
+      if (Math.random() < 0.2) {
+        pop('OIL SLICK!', '#ff0844', p.x, p.y - 25, 0.95);
+        burst(p.x, p.y, 4, ['#7928ca', '#ff0844'], 90);
+      }
+    }
+    if (s.y > H + 60) g.slicks.splice(i, 1);
+  }
+
+  // --- WINDSHIELD WIPER BLADE MECHANIC ---
+  const wp = g.wiper;
+  // Non-linear wiper acceleration with turnaround pauses
+  const wiperSpeed = (2.2 + clamp(g.t / 50, 0, 1.8)) * (g.frenzy ? 0.6 : 1);
+  wp.ang += wp.dir * wiperSpeed * dt;
+  if (wp.ang > 0.85) {
+    wp.ang = 0.85;
+    wp.dir = -1;
+    sfx.wiperSqueak();
+  } else if (wp.ang < -0.85) {
+    wp.ang = -0.85;
+    wp.dir = 1;
+    sfx.wiperSqueak();
+  }
+
+  // Calculate wiper blade line equation: Pivot at bottom center (W*0.5, H + 60)
+  const pivotX = W * 0.5;
+  const pivotY = H + 80;
+  const armLen = Math.max(W, H) * 1.05;
+  const tipX = pivotX + Math.sin(wp.ang) * armLen;
+  const tipY = pivotY - Math.cos(wp.ang) * armLen;
+
+  // Wiper blade clears droplets in its sweep path
+  for (let i = g.drops.length - 1; i >= 0; i--) {
+    const d = g.drops[i];
+    const distToBlade = distToSegment(d.x, d.y, pivotX, pivotY, tipX, tipY);
+    if (distToBlade < d.r + 10) {
+      g.drops.splice(i, 1);
+    }
+  }
+
+  // Collision with player droplet!
+  const distPlayerToBlade = distToSegment(p.x, p.y, pivotX, pivotY, tipX, tipY);
+  if (distPlayerToBlade < p.r + 8 && p.invuln <= 0) {
+    p.invuln = 1.8;
+    g.lives--;
+    g.combo = 0;
+    p.mass = 1;
+    g.shake = 1.1;
+    sfx.hit();
+    burst(p.x, p.y, 25, ['#ff0844', '#ffffff', '#ffd200'], 260);
+    pop('WIPED OUT! -1 LIFE', '#ff0844', p.x, p.y - 35, 1.3);
+
+    // Knockback
+    p.x += wp.dir * 45;
+    p.y += 35;
+
+    if (g.lives <= 0) {
+      state = ST.OVER;
+      overT = 0;
+      g.rank = saveTop(g.score);
+    }
+  }
+}
+
+function distToSegment(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const l2 = dx * dx + dy * dy || 1;
+  const t = clamp(((px - x1) * dx + (py - y1) * dy) / l2, 0, 1);
+  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+}
+
+/* ---------- input handlers ---------- */
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault(); audio();
+  try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+  if (state === ST.START) { startGame(); return; }
+  if (state === ST.OVER) { if (overT > 0.8) startGame(); return; }
+  inp.ptrId = e.pointerId;
+  inp.down = true;
+  // Offset aim point slightly above finger so finger does not cover droplet!
+  inp.tx = e.clientX;
+  inp.ty = e.clientY - 38;
+  G.hint = 0;
+});
+cv.addEventListener('pointermove', e => {
+  if (e.pointerId !== inp.ptrId && e.pointerType !== 'mouse') return;
+  inp.tx = e.clientX;
+  inp.ty = e.clientY - 38;
+});
+const releasePtr = e => {
+  if (e.pointerId === inp.ptrId) {
+    inp.ptrId = null;
+    inp.down = false;
+  }
+};
+cv.addEventListener('pointerup', releasePtr);
+cv.addEventListener('pointercancel', releasePtr);
+
+addEventListener('keydown', e => {
+  const c = e.code;
+  if (c === 'ArrowLeft' || c === 'KeyA') inp.keys.l = 1;
+  else if (c === 'ArrowRight' || c === 'KeyD') inp.keys.r = 1;
+  else if (c === 'ArrowUp' || c === 'KeyW') inp.keys.u = 1;
+  else if (c === 'ArrowDown' || c === 'KeyS') inp.keys.d = 1;
+  else if (c === 'Space' || c === 'Enter') {
+    if (!e.repeat) {
+      audio();
+      if (state === ST.START) startGame();
+      else if (state === ST.OVER && overT > 0.8) startGame();
+    }
+  } else return;
+  if (G) G.hint = 0;
+  e.preventDefault();
+});
+addEventListener('keyup', e => {
+  const c = e.code;
+  if (c === 'ArrowLeft' || c === 'KeyA') inp.keys.l = 0;
+  else if (c === 'ArrowRight' || c === 'KeyD') inp.keys.r = 0;
+  else if (c === 'ArrowUp' || c === 'KeyW') inp.keys.u = 0;
+  else if (c === 'ArrowDown' || c === 'KeyS') inp.keys.d = 0;
+});
+addEventListener('blur', () => { inp.keys = {}; inp.ptrId = null; });
+
+/* ---------- rendering engine ---------- */
+function txt(s, x, y, size, col, weight = 'bold', alpha = 1, align = 'center') {
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = col;
+  ctx.font = weight + ' ' + size + 'px system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
+  ctx.textAlign = align;
+  ctx.textBaseline = 'middle';
+  ctx.fillText(s, x, y);
+  ctx.globalAlpha = 1;
+}
+
+function drawCityNight() {
+  // Dark rainy windshield glass tint
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#020610');
+  grad.addColorStop(0.5, '#040d1a');
+  grad.addColorStop(1, '#081628');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Blurred Tokyo night highway bokeh
+  for (const b of bokeh) {
+    const scrX = b.x * W;
+    const scrY = b.y * H;
+    const g = ctx.createRadialGradient(scrX, scrY, 0, scrX, scrY, b.r);
+    g.addColorStop(0, b.col);
+    g.addColorStop(0.5, b.col);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.save();
+    ctx.globalAlpha = b.alpha * (G.frenzy ? 1.4 : 1);
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(scrX, scrY, b.r, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Aerodynamic rain streak lines on windshield glass
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  for (let i = 0; i < 24; i++) {
+    const rx = (i * 73 + G.t * 80) % W;
+    const ry = (i * 127 + G.t * 540) % H;
+    ctx.moveTo(rx, ry);
+    ctx.lineTo(rx - 4, ry + 26);
+  }
+  ctx.stroke();
+}
+
+function drawPatches() {
+  // 1. Hydrophobic Booster Strips
+  for (const b of G.boosts) {
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    const grad = ctx.createLinearGradient(0, -b.h * 0.5, 0, b.h * 0.5);
+    grad.addColorStop(0, 'rgba(0, 242, 254, 0.45)');
+    grad.addColorStop(0.5, 'rgba(56, 239, 125, 0.35)');
+    grad.addColorStop(1, 'rgba(0, 242, 254, 0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.roundRect(-b.w * 0.5, -b.h * 0.5, b.w, b.h, 12);
+    ctx.fill();
+
+    // Arrows pointing down
+    ctx.strokeStyle = '#38f9d7';
+    ctx.lineWidth = 2;
+    for (let k = -1; k <= 1; k++) {
+      ctx.beginPath();
+      ctx.moveTo(-10, k * 18 - 6);
+      ctx.lineTo(0, k * 18 + 4);
+      ctx.lineTo(10, k * 18 - 6);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // 2. Oil / Grease Slicks
+  for (const s of G.slicks) {
+    ctx.save();
+    const g = ctx.createRadialGradient(s.x, s.y, s.r * 0.2, s.x, s.y, s.r);
+    g.addColorStop(0, `hsla(${s.hue}, 90%, 65%, 0.45)`);
+    g.addColorStop(0.6, `hsla(${s.hue + 60}, 90%, 55%, 0.3)`);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawDroplets() {
+  for (const d of G.drops) {
+    ctx.save();
+    // Drop shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.beginPath();
+    ctx.ellipse(d.x + 2, d.y + 4, d.r * 1.1, d.r * 0.85, 0, 0, TAU);
+    ctx.fill();
+
+    // Refractive liquid body
+    const grad = ctx.createRadialGradient(d.x - d.r * 0.35, d.y - d.r * 0.35, d.r * 0.1, d.x, d.y, d.r);
+    if (d.gold) {
+      grad.addColorStop(0, '#ffffff');
+      grad.addColorStop(0.45, '#ffd200');
+      grad.addColorStop(1, '#ff6a00');
+    } else {
+      grad.addColorStop(0, '#ffffff');
+      grad.addColorStop(0.45, '#7df0ff');
+      grad.addColorStop(1, '#095f7c');
+    }
+
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(d.x, d.y, d.r, 0, TAU);
+    ctx.fill();
+
+    // Glossy specular crescent highlight
+    ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+    ctx.lineWidth = Math.max(1, d.r * 0.22);
+    ctx.beginPath();
+    ctx.arc(d.x, d.y, d.r * 0.65, -Math.PI * 0.8, -Math.PI * 0.2);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+}
+
+function drawWiper() {
+  const wp = G.wiper;
+  const pivotX = W * 0.5;
+  const pivotY = H + 80;
+  const armLen = Math.max(W, H) * 1.05;
+  const tipX = pivotX + Math.sin(wp.ang) * armLen;
+  const tipY = pivotY - Math.cos(wp.ang) * armLen;
+
+  ctx.save();
+  // 1. Cast shadow of wiper blade on windshield
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.45)';
+  ctx.lineWidth = 14;
+  ctx.beginPath();
+  ctx.moveTo(pivotX + 6, pivotY + 8);
+  ctx.lineTo(tipX + 6, tipY + 8);
+  ctx.stroke();
+
+  // 2. Rubber squeegee edge
+  ctx.strokeStyle = '#ff0844';
+  ctx.lineWidth = 6;
+  ctx.beginPath();
+  ctx.moveTo(pivotX, pivotY);
+  ctx.lineTo(tipX, tipY);
+  ctx.stroke();
+
+  // 3. Heavy steel wiper arm assembly
+  ctx.strokeStyle = '#2d3748';
+  ctx.lineWidth = 10;
+  ctx.beginPath();
+  ctx.moveTo(pivotX, pivotY);
+  ctx.lineTo(tipX, tipY);
+  ctx.stroke();
+
+  // 4. Chrome support struts
+  ctx.strokeStyle = '#cbd5e1';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(pivotX - Math.cos(wp.ang) * 4, pivotY - Math.sin(wp.ang) * 4);
+  ctx.lineTo(tipX - Math.cos(wp.ang) * 4, tipY - Math.sin(wp.ang) * 4);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawPlayerDroplet() {
+  const p = G.p;
+
+  ctx.save();
+  ctx.translate(p.x, p.y);
+
+  // Invulnerability blink
+  if (p.invuln > 0 && Math.floor(Date.now() / 70) % 2 === 0) {
+    ctx.globalAlpha = 0.4;
+  }
+
+  // Trailing wet droplets
+  for (const t of p.tail) {
+    if (t.a <= 0) continue;
+    ctx.fillStyle = `rgba(56, 249, 215, ${t.a * 0.35})`;
+    ctx.beginPath();
+    ctx.arc(t.x - p.x, t.y - p.y, t.r, 0, TAU);
+    ctx.fill();
+  }
+
+  // Soft glass drop shadow
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+  ctx.beginPath();
+  ctx.ellipse(3, 6, p.r * 1.15, p.r * 0.9, 0, 0, TAU);
+  ctx.fill();
+
+  // Fluid meniscus body with spring wobble
+  ctx.scale(p.wx, p.wy);
+
+  // Internal Refraction Shader: Inverts and magnifies bokeh
+  const bodyGrad = ctx.createRadialGradient(-p.r * 0.35, -p.r * 0.35, p.r * 0.1, 0, 0, p.r);
+  if (G.frenzy) {
+    bodyGrad.addColorStop(0, '#ffffff');
+    bodyGrad.addColorStop(0.4, '#ff0844');
+    bodyGrad.addColorStop(0.85, '#ffd200');
+    bodyGrad.addColorStop(1, '#7928ca');
+  } else {
+    bodyGrad.addColorStop(0, '#ffffff');
+    bodyGrad.addColorStop(0.35, '#38f9d7');
+    bodyGrad.addColorStop(0.75, '#00f2fe');
+    bodyGrad.addColorStop(1, '#065268');
+  }
+
+  ctx.fillStyle = bodyGrad;
+  ctx.beginPath();
+  ctx.arc(0, 0, p.r, 0, TAU);
+  ctx.fill();
+
+  // Glass Specular Highlight Arc
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = Math.max(1.8, p.r * 0.18);
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.arc(0, 0, p.r * 0.72, -Math.PI * 0.85, -Math.PI * 0.15);
+  ctx.stroke();
+
+  // Tiny secondary specular twinkle
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(p.r * 0.42, p.r * 0.42, p.r * 0.12, 0, TAU);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawHUD() {
+  const g = G;
+  const pad = Math.max(12, W * 0.035);
+  const topY = safe + 10;
+  const fs = Math.min(1, W / 420);
+
+  // Left Panel: Score
+  ctx.fillStyle = 'rgba(4, 13, 26, 0.75)';
+  ctx.beginPath();
+  ctx.roundRect(pad, topY, 130 * fs, 58 * fs, 14);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(56, 249, 215, 0.25)';
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
+
+  txt(String(Math.floor(g.score)), pad + 65 * fs, topY + 22 * fs, 22 * fs, '#ffffff');
+  txt('NEON SCORE', pad + 65 * fs, topY + 44 * fs, 11 * fs, 'var(--neon-blue)', 'bold', 0.95);
+
+  // Right Panel: Water Shields (Lives)
+  const rw = 120 * fs;
+  const rx = W - pad - rw;
+  ctx.fillStyle = 'rgba(4, 13, 26, 0.75)';
+  ctx.beginPath();
+  ctx.roundRect(rx, topY, rw, 58 * fs, 14);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(56, 249, 215, 0.25)';
+  ctx.stroke();
+
+  let shields = '';
+  for (let i = 0; i < 3; i++) shields += i < g.lives ? '💧 ' : '▫ ';
+  txt(shields.trim(), rx + rw / 2, topY + 22 * fs, 16 * fs, 'var(--neon-blue)');
+  txt('SHIELDS', rx + rw / 2, topY + 44 * fs, 11 * fs, '#94a3b8', 'bold', 0.95);
+
+  // Streak Multiplier Pill
+  if (g.combo > 1) {
+    const pillW = 88 * fs;
+    ctx.fillStyle = g.frenzy ? 'rgba(255, 8, 68, 0.92)' : 'rgba(56, 249, 215, 0.88)';
+    ctx.beginPath();
+    ctx.roundRect(W / 2 - pillW / 2, topY + 8 * fs, pillW, 26 * fs, 13);
+    ctx.fill();
+    txt((1 + g.combo * 0.25).toFixed(1) + 'X FLOW', W / 2, topY + 21 * fs, 12 * fs, '#02050b', '900');
+  }
+
+  // Onboarding Hint
+  if (g.hint > 0 && g.t < 9) {
+    const hw = Math.min(W * 0.9, 440);
+    const hy = H * 0.35;
+    ctx.fillStyle = 'rgba(4, 13, 26, 0.88)';
+    ctx.beginPath();
+    ctx.roundRect(W / 2 - hw / 2, hy - 40, hw, 84, 16);
+    ctx.fill();
+    ctx.strokeStyle = 'var(--neon-blue)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    txt('DRAG to steer your raindrop on the glass!', W / 2, hy - 14, Math.min(16, W / 23), '#ffffff', 'bold');
+    txt('MERGE with falling droplets to grow & multiply score.', W / 2, hy + 10, Math.min(13, W / 27), 'var(--neon-blue)', 'bold');
+    txt('DODGE THE WIPER BLADES or be wiped away!', W / 2, hy + 30, Math.min(13, W / 27), 'var(--neon-pink)', 'bold');
+  }
+}
+
+function drawPanel(title, tcol, sub, now) {
+  const g = G, pulse = Math.sin(now * 0.008);
+  const w = Math.min(W * 0.9, 400), x0 = (W - w) / 2, y0 = Math.max(safe + 25, H * 0.14), h = 380;
+
+  ctx.fillStyle = 'rgba(2, 5, 11, 0.88)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.fillStyle = 'rgba(6, 16, 32, 0.96)';
+  ctx.beginPath();
+  ctx.roundRect(x0, y0, w, h, 20);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(56, 249, 215, 0.25)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  txt(title, W / 2, y0 + 38, Math.min(32, w / 10), tcol);
+  txt(sub, W / 2, y0 + 68, 14, '#94a3b8', 'bold', 0.9);
+
+  txt(String(Math.floor(g.score)), W / 2, y0 + 118, 48, '#ffffff');
+  txt('FINAL RAIN SCORE', W / 2, y0 + 152, 12, 'var(--neon-gold)', 'bold');
+  txt('MAX COMBO FLOW: ' + g.bestCombo + 'X', W / 2, y0 + 178, 14, 'var(--neon-blue)', 'bold');
+
+  // Top 5 Leaderboard
+  txt('LOCAL HIGH SCORES', W / 2, y0 + 208, 11, '#64748b', 'bold');
+  top5.forEach((s, i) => {
+    const yy = y0 + 234 + i * 26;
+    const isMe = i === g.rank;
+    ctx.fillStyle = isMe ? 'rgba(56, 249, 215, 0.22)' : 'rgba(255, 255, 255, 0.05)';
+    ctx.beginPath();
+    ctx.roundRect(x0 + 24, yy - 11, w - 48, 22, 6);
+    ctx.fill();
+
+    txt('#' + (i + 1), x0 + 44, yy, 12, i === 0 ? 'var(--neon-gold)' : '#ffffff', 'bold');
+    txt(String(s), x0 + w - 44, yy, 13, isMe ? 'var(--neon-blue)' : '#d8daf0', 'bold', 1, 'right');
+  });
+
+  if (overT > 0.8) {
+    txt('TAP TO PLAY AGAIN', W / 2, y0 + h + 32, 22, '#ffffff', 'bold', 0.65 + 0.35 * pulse);
+  }
+}
+
+function draw(now) {
+  const g = G, pulse = Math.sin(now * 0.008);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  ctx.save();
+  if (g.shake > 0) {
+    ctx.translate((Math.random() - 0.5) * 12 * g.shake, (Math.random() - 0.5) * 12 * g.shake);
+  }
+
+  drawCityNight();
+  drawPatches();
+  drawDroplets();
+  drawWiper();
+  drawPlayerDroplet();
+
+  // Floating particles
+  for (const q of g.parts) {
+    ctx.globalAlpha = clamp(q.l / q.max, 0, 1);
+    ctx.fillStyle = q.col;
+    ctx.beginPath();
+    ctx.arc(q.x, q.y, q.r, 0, TAU);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Floating popups
+  for (const q of g.pops) {
+    txt(q.t, q.x, q.y, 18 * q.scale, q.col, 'bold', clamp(q.l * 1.5, 0, 1));
+  }
+
+  ctx.restore();
+
+  // Vignette overlay
+  const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.45, W / 2, H / 2, Math.max(W, H) * 0.85);
+  vg.addColorStop(0, 'rgba(0,0,0,0)');
+  vg.addColorStop(1, 'rgba(0, 3, 8, 0.6)');
+  ctx.fillStyle = vg;
+  ctx.fillRect(0, 0, W, H);
+
+  // HUD & Menus
+  if (state === ST.PLAY) {
+    drawHUD();
+  } else if (state === ST.START) {
+    ctx.fillStyle = 'rgba(2, 5, 11, 0.65)';
+    ctx.fillRect(0, 0, W, H);
+    txt('NEON RAIN', W / 2, H * 0.24, Math.min(54, W / 7), 'var(--neon-blue)');
+    txt('Windshield Surface-Tension Fluid Arcade', W / 2, H * 0.24 + 48, Math.min(16, W / 24), '#ffffff', 'bold', 0.95);
+    txt('Drag your raindrop. Merge & dodge the wiper blades.', W / 2, H * 0.24 + 74, Math.min(14, W / 26), '#94a3b8', 'bold', 0.9);
+    txt('TAP TO PLAY', W / 2, H * 0.62, 24, '#ffffff', 'bold', 0.65 + 0.35 * pulse);
+    if (top5.length) txt('RECORD SCORE  ' + top5[0], W / 2, H * 0.62 + 38, 16, 'var(--neon-gold)', 'bold');
+  } else if (state === ST.OVER) {
+    drawPanel('WIPED OUT', 'var(--neon-pink)', 'Your drop was swept from the glass', now);
+  }
+}
+
+resize();
+startLoop();
+})();
+</script>
+</body>
+</html>

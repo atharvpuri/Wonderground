@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Singularity</title>
+<style>
+:root{--bg:#04040c}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#04040c}}
+:root[data-theme="dark"]{--bg:#04040c}
+html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;overscroll-behavior:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+canvas{position:fixed;inset:0;display:block;touch-action:none;background:var(--bg)}
+#probe{position:fixed;top:0;left:0;visibility:hidden;padding-top:env(safe-area-inset-top,0px)}
+</style>
+</head>
+<body>
+<div id="probe"></div>
+<canvas id="c"></canvas>
+<script>
+(() => {
+'use strict';
+const STATES = { START: 0, PLAYING: 1, GAMEOVER: 2 };
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), probe = document.getElementById('probe');
+const TAU = Math.PI * 2, D = 130, Z0 = 60, M0 = 55, MMIN = 16;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+};
+let best = parseInt(store.get('singularity.best') || '0', 10) || 0;
+
+/* ---------- canvas + perspective camera ---------- */
+let W, H, dpr, WW, sN, f, camH, hy, yN, yF, safeTop = 0;
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 3);
+  W = innerWidth; H = innerHeight;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  WW = 100 * Math.max(1, (W / H) / 0.7);
+  sN = W / WW; f = sN * Z0;
+  const sF = sN * Z0 / (D + Z0);
+  yN = H * 0.9; yF = H * 0.2;
+  camH = (yN - yF) / (sN - sF); hy = yF - camH * sF;
+  safeTop = probe.offsetHeight || 0;
+}
+const proj = (x, z) => { const s = f / (z + Z0); return { x: W / 2 + x * s, y: hy + camH * s, s }; };
+const unproj = (sx, sy) => { const s = (sy - hy) / camH; return { x: (sx - W / 2) / s, z: f / s - Z0 }; };
+addEventListener('resize', resize);
+addEventListener('orientationchange', () => setTimeout(resize, 120));
+
+/* ---------- audio ---------- */
+let AC = null;
+function audio() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { AC = null; } }
+  if (AC && AC.state === 'suspended') AC.resume();
+  return AC;
+}
+function tone(type, f0, f1, dur, vol, delay) {
+  const a = audio(); if (!a) return;
+  try {
+    const o = a.createOscillator(), g = a.createGain(), t = a.currentTime + (delay || 0);
+    o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(a.destination); o.start(t); o.stop(t + dur + 0.03);
+  } catch (e) {}
+}
+const sfx = {
+  eat(c) { const b = 330 * Math.pow(1.0595, Math.min(c, 12) * 2); tone('sine', b, b * 2, 0.12, 0.14); },
+  hit() { tone('sawtooth', 220, 50, 0.3, 0.16); },
+  nova() { tone('square', 160, 30, 0.5, 0.14); tone('sawtooth', 90, 25, 0.6, 0.12); },
+  over() { tone('sawtooth', 400, 30, 1.1, 0.16); tone('square', 200, 20, 1.3, 0.1, 0.1); },
+  start() { tone('triangle', 330, 660, 0.15, 0.1); tone('triangle', 495, 990, 0.18, 0.1, 0.1); }
+};
+
+/* ---------- state ---------- */
+let state = STATES.START, G, raf = 0, last = 0, overAt = 0;
+const sky = Array.from({ length: 70 }, () => ({ x: Math.random(), y: Math.random(), s: Math.random() * 1.5 + 0.3, p: Math.random() * 6 }));
+const keys = { l: 0, r: 0, u: 0, d: 0 };
+
+function resetGame() {
+  G = { m: M0, dr: Math.sqrt(M0), x: 0, z: D * 0.4, vx: 0, vz: 0, tx: 0, tz: D * 0.4, score: 0, combo: 0, comboT: 0, inv: 0, shake: 0, t: 0, ents: [], parts: [], spin: 0, flash: 0 };
+  for (let i = 0; i < 8; i++) spawn(true);
+}
+const holeR = () => Math.sqrt(G.m);
+
+function spawn(initial) {
+  const hr = holeR(), nov = Math.random() < 0.1 + Math.min(0.2, G.t / 240);
+  const edibles = G.ents.filter(e => e.k === 'star' && e.r < hr * 0.9).length;
+  let x, z, tries = 0;
+  do { x = (Math.random() - .5) * (WW - 8); z = 4 + Math.random() * (D - 8); tries++; }
+  while (tries < 12 && Math.hypot(x - G.x, z - G.z) < 28);
+  const a = Math.random() * TAU, sp = 4 + Math.random() * 7;
+  let r = hr * (0.25 + Math.random() * 1.35);
+  if (edibles < 4) r = hr * (0.3 + Math.random() * 0.4);
+  r = clamp(r, 1.8, 24);
+  G.ents.push(nov ? { k: 'nova', x, z, vx: Math.cos(a) * 3, vz: Math.sin(a) * 3, r: 3.5, age: initial ? 1 : 0, hue: 0, eat: -1 }
+    : { k: 'star', x, z, vx: Math.cos(a) * sp, vz: Math.sin(a) * sp, r, age: initial ? 1 : 0, hue: Math.random() * 30 - 15, eat: -1 });
+}
+function burst(x, y, n, col, spd) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * TAU, s = spd * (0.2 + Math.random());
+    G.parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.4 + Math.random() * 0.7, max: 1.1, col, sz: 1.5 + Math.random() * 2.5 });
+  }
+}
+
+/* ---------- loop (single pointer) ---------- */
+function stopLoop() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+function startLoop() { stopLoop(); last = performance.now(); raf = requestAnimationFrame(frame); }
+function frame(now) {
+  raf = requestAnimationFrame(frame);
+  const dt = Math.min(0.05, Math.max(0, (now - last) / 1000)); last = now;
+  update(dt); draw(now);
+}
+document.addEventListener('visibilitychange', () => { document.hidden ? stopLoop() : startLoop(); });
+function startGame() { stopLoop(); resetGame(); state = STATES.PLAYING; sfx.start(); startLoop(); }
+
+/* ---------- update ---------- */
+function update(dt) {
+  const g = G, playing = state === STATES.PLAYING;
+  g.spin += dt; g.shake = Math.max(0, g.shake - dt * 2.5); g.inv = Math.max(0, g.inv - dt); g.flash = Math.max(0, g.flash - dt);
+  for (let i = g.parts.length - 1; i >= 0; i--) {
+    const p = g.parts[i]; p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.98; p.vy *= 0.98;
+    if (p.life <= 0) g.parts.splice(i, 1);
+  }
+  const hr = holeR();
+  if (playing) {
+    g.t += dt;
+    g.m -= (0.5 + 0.012 * g.m) * dt;
+    g.dr += (hr - g.dr) * Math.min(1, dt * 8);
+    g.comboT -= dt; if (g.comboT <= 0) g.combo = 0;
+    const kx = keys.r - keys.l, kz = keys.d - keys.u;
+    if (kx || kz) { g.tx = clamp(g.x + kx * 18, -WW / 2, WW / 2); g.tz = clamp(g.z + kz * 18, 0, D); }
+    g.vx += ((g.tx - g.x) * 9 - g.vx * 4.2) * dt; g.vz += ((g.tz - g.z) * 9 - g.vz * 4.2) * dt;
+    const sp = Math.hypot(g.vx, g.vz), mx = 60; if (sp > mx) { g.vx *= mx / sp; g.vz *= mx / sp; }
+    g.x = clamp(g.x + g.vx * dt, -WW / 2, WW / 2); g.z = clamp(g.z + g.vz * dt, 0, D);
+    const target = 9 + Math.min(7, Math.floor(g.t / 20));
+    if (g.ents.length < target && Math.random() < dt * 2.5) spawn(false);
+  } else g.dr = Math.sqrt(g.m);
+
+  for (let i = g.ents.length - 1; i >= 0; i--) {
+    const e = g.ents[i]; e.age += dt;
+    if (e.eat >= 0) { e.eat += dt * 4; e.x += (g.x - e.x) * Math.min(1, dt * 12); e.z += (g.z - e.z) * Math.min(1, dt * 12); if (e.eat >= 1) g.ents.splice(i, 1); continue; }
+    const dx = g.x - e.x, dz = g.z - e.z, d = Math.hypot(dx, dz) || 1;
+    const edible = e.k === 'star' && e.r < hr * 0.9;
+    if (playing && edible && d < hr * 3.2) {
+      const fr = Math.pow(1 - d / (hr * 3.2), 2) * 70 * Math.sqrt(hr / 7);
+      e.vx += dx / d * fr * dt; e.vz += dz / d * fr * dt;
+    }
+    e.x += e.vx * dt; e.z += e.vz * dt;
+    if (e.x < -WW / 2 + e.r) { e.x = -WW / 2 + e.r; e.vx = Math.abs(e.vx); }
+    if (e.x > WW / 2 - e.r) { e.x = WW / 2 - e.r; e.vx = -Math.abs(e.vx); }
+    if (e.z < e.r) { e.z = e.r; e.vz = Math.abs(e.vz); }
+    if (e.z > D - e.r) { e.z = D - e.r; e.vz = -Math.abs(e.vz); }
+    const sv = Math.hypot(e.vx, e.vz), cap = e.k === 'nova' ? 5 : 16; if (sv > cap) { e.vx *= cap / sv; e.vz *= cap / sv; }
+    if (!playing) continue;
+    const p = proj(e.x, e.z);
+    if (edible && d < hr * 0.85) {
+      e.eat = 0; g.combo++; g.comboT = 1.6;
+      const gain = e.r * e.r * 0.8; g.m += gain; g.score += gain * (1 + Math.min(g.combo, 10) * 0.25);
+      sfx.eat(g.combo); burst(p.x, p.y - e.r * p.s, 10, '#5ff0ff', 120);
+    } else if (e.k === 'star' && !edible && g.inv <= 0 && d < hr * 0.75 + e.r * 0.75) {
+      g.m *= 0.7; g.inv = 1.1; g.shake = 0.7; g.combo = 0; sfx.hit();
+      g.vx -= dx / d * 40; g.vz -= dz / d * 40; e.vx -= dx / d * 18; e.vz -= dz / d * 18;
+      burst(p.x, p.y, 16, '#ff7a3d', 200);
+    } else if (e.k === 'nova' && g.inv <= 0 && d < hr * 0.7 + e.r) {
+      g.m *= 0.72; g.inv = 1.1; g.shake = 1; g.combo = 0; sfx.nova();
+      burst(p.x, p.y, 30, '#ff3d6e', 280); g.ents.splice(i, 1);
+    }
+  }
+  if (playing && g.m < MMIN) {
+    state = STATES.GAMEOVER; overAt = performance.now(); sfx.over(); g.shake = 1;
+    const p = proj(g.x, g.z); burst(p.x, p.y, 60, '#ffffff', 260); burst(p.x, p.y, 40, '#b36bff', 200);
+    const s = Math.floor(g.score); if (s > best) { best = s; store.set('singularity.best', String(best)); }
+  }
+}
+
+/* ---------- input ---------- */
+function setTarget(e) {
+  if (state !== STATES.PLAYING) return;
+  const sy = clamp(e.clientY - (e.pointerType === 'touch' ? 70 : 0), yF + 4, yN);
+  const u = unproj(e.clientX, sy);
+  G.tx = clamp(u.x, -WW / 2, WW / 2); G.tz = clamp(u.z, 0, D);
+}
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault(); audio();
+  if (state === STATES.START) startGame();
+  else if (state === STATES.GAMEOVER) { if (performance.now() - overAt > 700) startGame(); }
+  else setTarget(e);
+});
+cv.addEventListener('pointermove', e => setTarget(e));
+addEventListener('keydown', e => {
+  const c = e.code;
+  if (c === 'ArrowLeft' || c === 'KeyA') keys.l = 1; else if (c === 'ArrowRight' || c === 'KeyD') keys.r = 1;
+  else if (c === 'ArrowUp' || c === 'KeyW') keys.u = 1; else if (c === 'ArrowDown' || c === 'KeyS') keys.d = 1;
+  else if ((c === 'Space' || c === 'Enter') && !e.repeat) {
+    audio(); if (state === STATES.START) startGame(); else if (state === STATES.GAMEOVER && performance.now() - overAt > 700) startGame();
+  } else return;
+  e.preventDefault();
+});
+addEventListener('keyup', e => {
+  const c = e.code;
+  if (c === 'ArrowLeft' || c === 'KeyA') keys.l = 0; else if (c === 'ArrowRight' || c === 'KeyD') keys.r = 0;
+  else if (c === 'ArrowUp' || c === 'KeyW') keys.u = 0; else if (c === 'ArrowDown' || c === 'KeyS') keys.d = 0;
+});
+
+/* ---------- drawing ---------- */
+function txt(s, x, y, size, col, weight, alpha) {
+  ctx.globalAlpha = alpha == null ? 1 : alpha; ctx.fillStyle = col;
+  ctx.font = (weight || 'bold') + ' ' + size + 'px system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(s, x, y); ctx.globalAlpha = 1;
+}
+function glow(x, y, r, col) {
+  const gr = ctx.createRadialGradient(x, y, 0, x, y, r); gr.addColorStop(0, col); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = gr; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+}
+function warp(x, z, hr) {
+  const dx = x - G.x, dz = z - G.z, fall = Math.exp(-(dx * dx + dz * dz) / (2 * hr * hr * 5.5));
+  const p = proj(x - dx * fall * 0.45, z - dz * fall * 0.45);
+  return { x: p.x, y: p.y + hr * 1.4 * fall * p.s };
+}
+function drawGrid(hr) {
+  ctx.lineWidth = 1.2;
+  const nx = Math.round(WW / 8), nz = 16, seg = 26;
+  for (let i = 0; i <= nx; i++) {
+    const x = -WW / 2 + i * WW / nx; ctx.strokeStyle = 'rgba(120,90,255,0.45)'; ctx.beginPath();
+    for (let j = 0; j <= seg; j++) { const p = warp(x, j * D / seg, hr); j ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y); }
+    ctx.stroke();
+  }
+  for (let j = 0; j <= nz; j++) {
+    const z = j * D / nz; ctx.strokeStyle = 'rgba(80,200,255,' + (0.55 - 0.4 * j / nz) + ')'; ctx.beginPath();
+    for (let i = 0; i <= seg; i++) { const p = warp(-WW / 2 + i * WW / seg, z, hr); i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y); }
+    ctx.stroke();
+  }
+}
+function drawStar(e, hr) {
+  const p = proj(e.x, e.z), sc = Math.min(1, e.age * 3) * (e.eat >= 0 ? 1 - e.eat : 1), r = e.r * p.s * sc;
+  if (r < 0.5) return;
+  if (e.k === 'nova') {
+    const pl = 1 + 0.25 * Math.sin(e.age * 8), cy = p.y - e.r * p.s * 1.2;
+    glow(p.x, cy, r * 4 * pl, 'rgba(255,40,90,0.7)');
+    ctx.fillStyle = '#ffd1dc'; ctx.beginPath(); ctx.arc(p.x, cy, r * 0.8 * pl, 0, TAU); ctx.fill(); return;
+  }
+  const edible = e.r < hr * 0.9, hue = (edible ? 185 : 18) + e.hue, cy = p.y - e.r * p.s * 0.9;
+  ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.beginPath(); ctx.ellipse(p.x, p.y, r, r * camH * p.s / f, 0, 0, TAU); ctx.fill();
+  glow(p.x, cy, r * 2.2, 'hsla(' + hue + ',100%,60%,0.25)');
+  const gr = ctx.createRadialGradient(p.x - r * 0.35, cy - r * 0.4, r * 0.1, p.x, cy, r);
+  gr.addColorStop(0, 'hsl(' + hue + ',100%,85%)'); gr.addColorStop(0.6, 'hsl(' + hue + ',85%,52%)'); gr.addColorStop(1, 'hsl(' + hue + ',80%,22%)');
+  ctx.fillStyle = gr; ctx.beginPath(); ctx.arc(p.x, cy, r, 0, TAU); ctx.fill();
+}
+function drawHole(hr, now, back) {
+  const p = proj(G.x, G.z), dp = G.dr, r = dp * p.s, ry = r * camH * p.s / f, cy = p.y + hr * 1.4 * p.s;
+  const ring = (front) => {
+    for (let i = 0; i < 46; i++) {
+      const sp = 0.8 + (i % 5) * 0.25, a = (i / 46) * TAU + G.spin * sp, rr = dp * (1.5 + (i % 7) * 0.13);
+      const s = Math.sin(a); if ((s > 0) === front) continue;
+      const x = p.x + Math.cos(a) * rr * p.s, y = cy + s * rr * p.s * camH * p.s / f;
+      ctx.fillStyle = 'hsl(' + (290 + (i % 6) * 14) + ',100%,' + (60 + (i % 4) * 8) + '%)';
+      ctx.globalAlpha = 0.85; ctx.fillRect(x - 1.5, y - 1.5, 3, 3);
+    }
+    ctx.globalAlpha = 1;
+  };
+  if (back) { glow(p.x, cy, r * 3.2, 'rgba(160,80,255,0.4)'); ring(false); return; }
+  ctx.globalAlpha = G.inv > 0 ? 0.5 + 0.5 * Math.sin(now * 0.04) : 1;
+  ctx.fillStyle = '#000'; ctx.beginPath(); ctx.ellipse(p.x, cy, r, ry, 0, 0, TAU); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,170,255,0.85)'; ctx.lineWidth = 2; ctx.stroke(); ctx.globalAlpha = 1;
+  ring(true);
+}
+function draw(now) {
+  const g = G, hr = g.dr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const bg = ctx.createLinearGradient(0, 0, 0, H); bg.addColorStop(0, '#04040c'); bg.addColorStop(0.35, '#150a33'); bg.addColorStop(1, '#070a1c');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  ctx.save();
+  if (g.shake > 0) ctx.translate((Math.random() - .5) * 18 * g.shake, (Math.random() - .5) * 18 * g.shake);
+  for (const s of sky) { ctx.globalAlpha = 0.3 + 0.4 * Math.abs(Math.sin(now * 0.001 + s.p)); ctx.fillStyle = '#cfd8ff'; ctx.fillRect(s.x * W, s.y * hy * 0.95, s.s, s.s); }
+  ctx.globalAlpha = 1;
+  drawGrid(hr);
+  const list = g.ents.slice().sort((a, b) => b.z - a.z);
+  const showHole = state !== STATES.START ? true : false;
+  if (showHole && state !== STATES.GAMEOVER) drawHole(hr, now, true);
+  let holeDone = !showHole || state === STATES.GAMEOVER;
+  for (const e of list) {
+    if (!holeDone && e.z < g.z) { drawHole(hr, now, false); holeDone = true; }
+    drawStar(e, hr);
+  }
+  if (!holeDone) drawHole(hr, now, false);
+  for (const p of g.parts) { ctx.globalAlpha = Math.max(0, p.life / p.max); ctx.fillStyle = p.col; ctx.fillRect(p.x - p.sz / 2, p.y - p.sz / 2, p.sz, p.sz); }
+  ctx.globalAlpha = 1; ctx.restore();
+
+  const top = safeTop + 32, pulse = Math.sin(now * 0.008);
+  if (state === STATES.PLAYING) {
+    txt(String(Math.floor(g.score)), W / 2, top, 34, '#f1eaff');
+    const bw = Math.min(240, W * 0.55), fr = clamp((g.m - MMIN) / (M0 - MMIN) / 2, 0, 1), low = g.m < 28;
+    ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(W / 2 - bw / 2, top + 24, bw, 8);
+    ctx.fillStyle = low ? '#ff4d6d' : '#7affc4'; ctx.globalAlpha = low ? 0.6 + 0.4 * pulse : 1; ctx.fillRect(W / 2 - bw / 2, top + 24, bw * fr, 8); ctx.globalAlpha = 1;
+    txt(low ? 'FADING - FEED!' : 'MASS', W / 2, top + 46, 12, low ? '#ff4d6d' : '#9fb4ff', 'bold', 0.85);
+    if (g.combo > 1) txt('COMBO x' + (1 + Math.min(g.combo, 10) * 0.25).toFixed(2), W / 2, top + 68, 16, '#ffd24a');
+    txt('BEST ' + best, W - 14 - 30, safeTop + 16, 12, '#9fb4ff', 'normal', 0.7);
+  } else if (state === STATES.START) {
+    txt('SINGULARITY', W / 2, H * 0.3, Math.min(54, W / 8), '#c79bff');
+    txt('Drag to steer your black hole', W / 2, H * 0.3 + 40, Math.min(17, W / 24), '#cfd8ff', 'normal');
+    txt('Eat cyan bodies. Dodge orange ones. Avoid red novas.', W / 2, H * 0.3 + 66, Math.min(15, W / 26), '#9fb4ff', 'normal');
+    txt('Your mass fades - keep feeding!', W / 2, H * 0.3 + 90, Math.min(15, W / 26), '#9fb4ff', 'normal');
+    txt('TAP / CLICK TO BEGIN', W / 2, H * 0.3 + 140, 22, '#fff', 'bold', 0.6 + 0.4 * pulse);
+    if (best) txt('BEST ' + best, W / 2, H * 0.3 + 176, 15, '#ffd24a', 'normal');
+  } else {
+    ctx.fillStyle = 'rgba(4,4,12,0.55)'; ctx.fillRect(0, 0, W, H);
+    txt('EVAPORATED', W / 2, H * 0.36, Math.min(46, W / 9), '#ff7ab0');
+    txt('SCORE ' + Math.floor(g.score), W / 2, H * 0.36 + 52, 30, '#f1eaff');
+    txt('BEST ' + best, W / 2, H * 0.36 + 88, 18, '#ffd24a', 'normal');
+    if (performance.now() - overAt > 700) txt('TAP / CLICK TO RETRY', W / 2, H * 0.36 + 138, 22, '#c79bff', 'bold', 0.6 + 0.4 * pulse);
+  }
+}
+
+resize(); resetGame(); startLoop();
+})();
+</script>
+</body>
+</html>

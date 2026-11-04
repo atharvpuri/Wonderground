@@ -1,0 +1,1768 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Peregrine Strike</title>
+  <style>
+    :root {
+      --bg-dark: #0a1118;
+      --gold: #f6c445;
+      --gold-glow: rgba(246, 196, 69, 0.45);
+      --cyan: #38d9a9;
+      --crimson: #ff4757;
+      --panel-bg: rgba(14, 23, 33, 0.82);
+      --panel-border: rgba(255, 255, 255, 0.12);
+      --text-main: #f1f5f9;
+      --text-sub: #94a3b8;
+    }
+    [data-theme="amber"] {
+      --gold: #ff922b;
+      --cyan: #20c997;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --panel-bg: rgba(10, 17, 24, 0.88);
+      }
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      overscroll-behavior: none;
+    }
+    #safe-inset-probe {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 0;
+      height: 0;
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      visibility: hidden;
+      pointer-events: none;
+    }
+    canvas#gameCanvas {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      touch-action: none;
+      display: block;
+      z-index: 1;
+    }
+  </style>
+</head>
+<body>
+  <div id="safe-inset-probe"></div>
+  <canvas id="gameCanvas"></canvas>
+
+  <script>
+  (function () {
+    'use strict';
+
+    // --- AUDIO SYNTHESIS SYSTEM (Web Audio API) ---
+    const Sound = {
+      ctx: null,
+      windNode: null,
+      windGain: null,
+      windFilter: null,
+      initialized: false,
+
+      init() {
+        if (this.initialized) return;
+        try {
+          const AudioContext = window.AudioContext || window.webkitAudioContext;
+          if (!AudioContext) return;
+          this.ctx = new AudioContext();
+          this.setupWindAmbience();
+          this.initialized = true;
+        } catch (e) {
+          // Graceful fallback if Web Audio is unsupported
+        }
+      },
+
+      resume() {
+        if (this.ctx && this.ctx.state === 'suspended') {
+          this.ctx.resume().catch(() => {});
+        }
+      },
+
+      setupWindAmbience() {
+        if (!this.ctx) return;
+        const bufferSize = this.ctx.sampleRate * 2;
+        const noiseBuffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+        const output = noiseBuffer.getChannelData(0);
+        let b0 = 0, b1 = 0, b2 = 0;
+        for (let i = 0; i < bufferSize; i++) {
+          const white = Math.random() * 2 - 1;
+          b0 = 0.99 * b0 + white * 0.05;
+          b1 = 0.96 * b1 + white * 0.1;
+          b2 = 0.85 * b2 + white * 0.2;
+          output[i] = (b0 + b1 + b2) * 0.35;
+        }
+
+        const whiteNoise = this.ctx.createBufferSource();
+        whiteNoise.buffer = noiseBuffer;
+        whiteNoise.loop = true;
+
+        this.windFilter = this.ctx.createBiquadFilter();
+        this.windFilter.type = 'lowpass';
+        this.windFilter.frequency.setValueAtTime(320, this.ctx.currentTime);
+
+        this.windGain = this.ctx.createGain();
+        this.windGain.gain.setValueAtTime(0.04, this.ctx.currentTime);
+
+        whiteNoise.connect(this.windFilter);
+        this.windFilter.connect(this.windGain);
+        this.windGain.connect(this.ctx.destination);
+        whiteNoise.start(0);
+      },
+
+      setWindIntensity(ratio) {
+        if (!this.ctx || !this.windGain || !this.windFilter) return;
+        const clamped = Math.max(0, Math.min(1, ratio));
+        const now = this.ctx.currentTime;
+        const targetFreq = 260 + clamped * 3800;
+        const targetVol = 0.04 + clamped * 0.32;
+        this.windFilter.frequency.setTargetAtTime(targetFreq, now, 0.08);
+        this.windGain.gain.setTargetAtTime(targetVol, now, 0.08);
+      },
+
+      playTalonStrike(speedRatio, isPerfect) {
+        if (!this.ctx) return;
+        const now = this.ctx.currentTime;
+        
+        // Impact punch
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = isPerfect ? 'triangle' : 'sine';
+        osc.frequency.setValueAtTime(140 + speedRatio * 80, now);
+        osc.frequency.exponentialRampToValueAtTime(35, now + 0.22);
+        
+        gain.gain.setValueAtTime(0.7, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+        
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.26);
+
+        // Chime harmonic
+        const chime = this.ctx.createOscillator();
+        const chimeGain = this.ctx.createGain();
+        chime.type = 'sine';
+        const baseFreq = isPerfect ? 880 : 587.33;
+        chime.frequency.setValueAtTime(baseFreq, now + 0.03);
+        chime.frequency.exponentialRampToValueAtTime(baseFreq * 1.5, now + 0.35);
+
+        chimeGain.gain.setValueAtTime(0, now);
+        chimeGain.gain.linearRampToValueAtTime(isPerfect ? 0.45 : 0.25, now + 0.04);
+        chimeGain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+
+        chime.connect(chimeGain);
+        chimeGain.connect(this.ctx.destination);
+        chime.start(now + 0.03);
+        chime.stop(now + 0.42);
+      },
+
+      playCrash() {
+        if (!this.ctx) return;
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(120, now);
+        osc.frequency.linearRampToValueAtTime(25, now + 0.4);
+
+        gain.gain.setValueAtTime(0.6, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.45);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.46);
+      },
+
+      playSonicBoom() {
+        if (!this.ctx) return;
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(80, now);
+        osc.frequency.exponentialRampToValueAtTime(30, now + 0.5);
+
+        gain.gain.setValueAtTime(0.8, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.52);
+      },
+
+      playComboBeep(step) {
+        if (!this.ctx) return;
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        const notes = [440, 493.88, 554.37, 587.33, 659.25, 739.99, 830.61, 880, 1108.7];
+        const freq = notes[Math.min(notes.length - 1, step)];
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, now);
+
+        gain.gain.setValueAtTime(0.25, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.2);
+      },
+
+      playWarning() {
+        if (!this.ctx) return;
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(750, now);
+        gain.gain.setValueAtTime(0.12, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.09);
+      },
+
+      playThermalGain() {
+        if (!this.ctx) return;
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(360, now);
+        osc.frequency.exponentialRampToValueAtTime(720, now + 0.3);
+
+        gain.gain.setValueAtTime(0.25, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.35);
+      }
+    };
+
+    // --- PSEUDO-RANDOM GENERATOR ---
+    function mulberry32(a) {
+      return function () {
+        let t = a += 0x6D2B79F5;
+        t = Math.imul(t ^ t >>> 15, t | 1);
+        t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+      };
+    }
+    const rng = mulberry32(1337);
+
+    // --- GAME CONSTANTS & STATE ENUMS ---
+    const STATES = {
+      START: 0,
+      PLAYING: 1,
+      GAMEOVER: 2
+    };
+
+    const CEILING_ALT = 950;
+    const CRASH_ALT = 0;
+    const STRIKE_MAX_ALT = 130;
+    const STRIKE_PERFECT_MIN = 12;
+    const STRIKE_PERFECT_MAX = 52;
+    const BASE_CRUISE_SPEED = 75; // km/h
+    const MAX_STOOP_SPEED = 385; // km/h
+
+    // --- CANVAS & VIEWPORT SETUP ---
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const probe = document.getElementById('safe-inset-probe');
+
+    let W = window.innerWidth;
+    let H = window.innerHeight;
+    let dpr = Math.min(window.devicePixelRatio || 1, 3);
+    let safeTop = 0;
+    let safeBottom = 0;
+
+    function resize() {
+      W = window.innerWidth;
+      H = window.innerHeight;
+      dpr = Math.min(window.devicePixelRatio || 1, 3);
+      canvas.width = Math.floor(W * dpr);
+      canvas.height = Math.floor(H * dpr);
+      canvas.style.width = W + 'px';
+      canvas.style.height = H + 'px';
+
+      const style = getComputedStyle(probe);
+      safeTop = parseFloat(style.paddingTop) || 0;
+      safeBottom = parseFloat(style.paddingBottom) || 0;
+    }
+    window.addEventListener('resize', resize);
+    window.addEventListener('orientationchange', resize);
+    resize();
+
+    // --- LOCAL STORAGE MANAGER ---
+    const STORAGE_KEY = 'peregrine_strike_v1_save';
+    function loadSaveData() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return { highScores: [0, 0, 0, 0, 0], maxSpeed: 0, maxCombo: 0, strikes: 0 };
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed.highScores)) parsed.highScores = [0, 0, 0, 0, 0];
+        while (parsed.highScores.length < 5) parsed.highScores.push(0);
+        parsed.highScores = parsed.highScores.slice(0, 5).map(v => Math.max(0, parseInt(v) || 0));
+        parsed.maxSpeed = Math.max(0, parseInt(parsed.maxSpeed) || 0);
+        parsed.maxCombo = Math.max(0, parseInt(parsed.maxCombo) || 0);
+        return parsed;
+      } catch (e) {
+        return { highScores: [0, 0, 0, 0, 0], maxSpeed: 0, maxCombo: 0, strikes: 0 };
+      }
+    }
+
+    function saveScore(score, speed, combo) {
+      try {
+        const data = loadSaveData();
+        data.highScores.push(Math.floor(score));
+        data.highScores.sort((a, b) => b - a);
+        data.highScores = data.highScores.slice(0, 5);
+        data.maxSpeed = Math.max(data.maxSpeed, Math.floor(speed));
+        data.maxCombo = Math.max(data.maxCombo, Math.floor(combo));
+        data.strikes = (data.strikes || 0) + 1;
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+        return {
+          rank: data.highScores.indexOf(Math.floor(score)) + 1,
+          isHigh: score > 0 && score === data.highScores[0],
+          data
+        };
+      } catch (e) {
+        return { rank: 1, isHigh: true, data: { highScores: [score, 0, 0, 0, 0], maxSpeed: speed, maxCombo: combo } };
+      }
+    }
+
+    // --- PREY TYPES & BEHAVIORS ---
+    const PREY_CONFIG = {
+      HARE: { name: 'Field Hare', color: '#f59f00', baseScore: 150, size: 14, speed: 60, icon: 'hare', minSpeedReq: 0 },
+      SALMON: { name: 'Leaping Trout', color: '#20c997', baseScore: 220, size: 16, speed: 40, icon: 'fish', minSpeedReq: 0 },
+      VIPER: { name: 'Canyon Viper', color: '#fa5252', baseScore: 340, size: 18, speed: 75, icon: 'viper', minSpeedReq: 160 },
+      ARMADILLO: { name: 'Iron Armadillo', color: '#adb5bd', baseScore: 500, size: 20, speed: 30, icon: 'armadillo', minSpeedReq: 240 },
+      PHOENIX: { name: 'Golden Phoenix', color: '#fcc419', baseScore: 1200, size: 24, speed: 120, icon: 'phoenix', minSpeedReq: 0 }
+    };
+
+    // --- PARTICLES & FLOATING TEXTS ---
+    let particles = [];
+    let popups = [];
+    let speedLines = [];
+
+    function addParticle(x, y, vx, vy, color, size, life, shape = 'circle') {
+      if (particles.length > 250) particles.shift();
+      particles.push({ x, y, vx, vy, color, size, life, maxLife: life, shape });
+    }
+
+    function addPopup(x, y, text, color, scale = 1, subtitle = '') {
+      popups.push({ x, y, text, color, scale, subtitle, life: 1.0, vy: -45 });
+    }
+
+    function spawnFeatherBurst(x, y, count, color = '#f8fafc') {
+      for (let i = 0; i < count; i++) {
+        const ang = Math.random() * Math.PI * 2;
+        const spd = 60 + Math.random() * 220;
+        addParticle(x, y, Math.cos(ang) * spd, Math.sin(ang) * spd, color, 4 + Math.random() * 5, 0.6 + Math.random() * 0.4, 'feather');
+      }
+    }
+
+    function spawnShockwave(x, y, radius, color = 'rgba(255,255,255,0.7)') {
+      addParticle(x, y, 0, 0, color, radius, 0.35, 'ring');
+    }
+
+    // --- GAME ENGINE STATE ---
+    let gameState = STATES.START;
+    let score = 0;
+    let displayScore = 0;
+    let combo = 0;
+    let comboTimer = 0;
+    let hearts = 3;
+    let currentWave = 1;
+    let waveProgress = 0;
+    const waveTarget = 5;
+    let gameTime = 0;
+    let lastTime = 0;
+    let rAFId = null;
+    let screenShake = 0;
+    let slowMo = 1.0;
+    let frenzyTimer = 0;
+    let onboardingActive = true;
+    let gameOverSaved = false;
+    let gameOverTimer = 0;
+    let lastSaveResult = null;
+    let hasSonicBoomed = false;
+
+    // --- TERRAIN GENERATION (Perspective scrolling grid & biome elements) ---
+    const BIOMES = [
+      { name: 'Sunlit Valleys', ground1: '#1b382b', ground2: '#162d22', rock: '#495057', river: '#1971c2', tree: '#2f9e44' },
+      { name: 'Red Sand Canyon', ground1: '#49261a', ground2: '#381c13', rock: '#873e23', river: '#0ca678', tree: '#d9480f' },
+      { name: 'Glacial Ridge', ground1: '#1c2d42', ground2: '#131e2c', rock: '#748ffc', river: '#4dabf7', tree: '#3bc9db' }
+    ];
+
+    let worldY = 0;
+    let worldX = 0;
+    let pillars = [];
+    let thermals = [];
+    let preys = [];
+
+    // --- PEREGRINE FALCON HERO CLASS ---
+    const Falcon = {
+      x: 0,
+      y: 0,
+      targetX: 0,
+      targetY: 0,
+      alt: CEILING_ALT, // Altitude in meters
+      speed: BASE_CRUISE_SPEED, // km/h
+      isStooping: false,
+      stoopDuration: 0,
+      wingSpread: 1.0, // 1 = wide glide, 0 = tucked bullet
+      heading: 0,
+      tilt: 0,
+      lastStrikeZone: false,
+      flaring: false,
+      flareTimer: 0,
+
+      reset() {
+        this.x = W * 0.5;
+        this.y = H * 0.65;
+        this.targetX = this.x;
+        this.targetY = this.y;
+        this.alt = CEILING_ALT;
+        this.speed = BASE_CRUISE_SPEED;
+        this.isStooping = false;
+        this.stoopDuration = 0;
+        this.wingSpread = 1.0;
+        this.heading = 0;
+        this.tilt = 0;
+        this.lastStrikeZone = false;
+        this.flaring = false;
+        this.flareTimer = 0;
+      },
+
+      update(dt) {
+        // Smooth follow pointer target with realistic aerodynamic banking
+        const dx = this.targetX - this.x;
+        const dy = this.targetY - this.y;
+        this.tilt = Math.max(-0.6, Math.min(0.6, dx * 0.005));
+        this.x += dx * Math.min(1, dt * 7.5);
+        this.y += dy * Math.min(1, dt * 7.5);
+
+        // Keep inside bounds
+        const margin = 45;
+        this.x = Math.max(margin, Math.min(W - margin, this.x));
+        this.y = Math.max(margin + safeTop, Math.min(H - margin - safeBottom, this.y));
+
+        if (this.isStooping) {
+          this.stoopDuration += dt;
+          // Wing tuck animation
+          this.wingSpread = Math.max(0.12, this.wingSpread - dt * 6);
+          // Rapid acceleration curve: starts fast, asymptotically approaches MAX_STOOP_SPEED
+          const targetSpd = MAX_STOOP_SPEED;
+          this.speed += (targetSpd - this.speed) * Math.min(1, dt * 2.8);
+          // Altitude plummets proportionally to speed
+          const altLossRate = (this.speed * 1.8) + 120;
+          this.alt -= altLossRate * dt;
+
+          // Sonic boom threshold
+          if (this.speed > 300 && !hasSonicBoomed) {
+            hasSonicBoomed = true;
+            Sound.playSonicBoom();
+            screenShake = Math.max(screenShake, 14);
+            spawnShockwave(this.x, this.y, 140, 'rgba(255, 230, 100, 0.9)');
+            addPopup(this.x, this.y - 30, 'SONIC STOOP!', '#ffe066', 1.25);
+          }
+
+          // Low altitude warning sound
+          if (this.alt < 90 && this.alt > 15 && Math.random() < 0.25) {
+            Sound.playWarning();
+          }
+
+          // Crash check
+          if (this.alt <= CRASH_ALT) {
+            this.handleCrash();
+          }
+        } else {
+          // Returning or cruising
+          hasSonicBoomed = false;
+          if (this.flaring) {
+            this.flareTimer -= dt;
+            this.wingSpread = Math.min(1.25, this.wingSpread + dt * 5);
+            // Rapid climb up to ceiling
+            this.alt += 650 * dt;
+            this.speed += (BASE_CRUISE_SPEED - this.speed) * Math.min(1, dt * 4.5);
+            if (this.alt >= CEILING_ALT) {
+              this.alt = CEILING_ALT;
+              this.flaring = false;
+            }
+          } else {
+            // Normal glide state
+            this.wingSpread = Math.min(1.0, this.wingSpread + dt * 3);
+            this.speed += (BASE_CRUISE_SPEED - this.speed) * Math.min(1, dt * 3.0);
+            if (this.alt < CEILING_ALT) {
+              this.alt = Math.min(CEILING_ALT, this.alt + 180 * dt);
+            }
+          }
+        }
+
+        // Speed audio feedback
+        const speedNorm = (this.speed - BASE_CRUISE_SPEED) / (MAX_STOOP_SPEED - BASE_CRUISE_SPEED);
+        Sound.setWindIntensity(this.isStooping ? 0.35 + speedNorm * 0.65 : 0.05);
+
+        // Trailing speed particles in steep stoop
+        if (this.isStooping && this.speed > 160) {
+          const trailColor = this.speed > 280 ? '#ffe066' : 'rgba(255,255,255,0.7)';
+          addParticle(
+            this.x + (Math.random() - 0.5) * 16,
+            this.y + 15,
+            (Math.random() - 0.5) * 20,
+            120 + Math.random() * 80,
+            trailColor,
+            this.speed > 280 ? 3.5 : 2,
+            0.22,
+            'line'
+          );
+        }
+      },
+
+      handleCrash() {
+        this.alt = 0;
+        this.isStooping = false;
+        this.flaring = true;
+        this.flareTimer = 1.0;
+        hearts--;
+        combo = 0;
+        screenShake = 22;
+        Sound.playCrash();
+        spawnFeatherBurst(this.x, this.y, 25, '#ff6b6b');
+        addPopup(this.x, this.y - 20, 'CRASH!', '#fa5252', 1.4, 'Too late to pull up');
+
+        if (hearts <= 0) {
+          triggerGameOver();
+        }
+      },
+
+      strike() {
+        if (!this.isStooping) return;
+        this.isStooping = false;
+        this.flaring = true;
+        this.flareTimer = 1.2;
+
+        const currentAlt = this.alt;
+        const currentSpd = this.speed;
+
+        // Check strike window
+        if (currentAlt > STRIKE_MAX_ALT) {
+          // Missed high
+          addPopup(this.x, this.y - 20, 'TOO HIGH!', '#adb5bd', 0.9, 'Prey escaped under cover');
+          combo = 0;
+          return;
+        }
+
+        // Test collision against targets
+        let hitTarget = null;
+        let hitDist = 999;
+        const falconWorldX = this.x;
+        const falconWorldY = this.y;
+
+        for (let i = 0; i < preys.length; i++) {
+          const p = preys[i];
+          const d = Math.hypot(p.x - falconWorldX, p.y - falconWorldY);
+          if (d < p.size + 36 && d < hitDist) {
+            hitTarget = p;
+            hitDist = d;
+          }
+        }
+
+        if (hitTarget) {
+          const isPerfect = currentAlt >= STRIKE_PERFECT_MIN && currentAlt <= STRIKE_PERFECT_MAX;
+          const config = PREY_CONFIG[hitTarget.type];
+
+          // Check speed armor requirement
+          if (config.minSpeedReq > 0 && currentSpd < config.minSpeedReq) {
+            // Deflected!
+            screenShake = 8;
+            Sound.playCrash();
+            spawnShockwave(hitTarget.x, hitTarget.y, 40, '#ffd43b');
+            addPopup(this.x, this.y - 25, 'ARMOR DEFLECTED!', '#ffa94d', 1.0, `Needs ${config.minSpeedReq} km/h`);
+            combo = 0;
+            return;
+          }
+
+          // Successful strike!
+          const speedMultiplier = 1 + (currentSpd / MAX_STOOP_SPEED) * 2.2;
+          const perfectMultiplier = isPerfect ? 2.0 : 1.0;
+          const frenzyMult = frenzyTimer > 0 ? 3.0 : 1.0;
+          combo++;
+          comboTimer = 5.0;
+
+          if (combo > 1) {
+            Sound.playComboBeep(combo);
+          }
+
+          const pts = Math.floor(config.baseScore * speedMultiplier * perfectMultiplier * frenzyMult * (1 + combo * 0.25));
+          score += pts;
+
+          // Juice!
+          screenShake = isPerfect ? 18 : 10;
+          slowMo = 0.35; // Brief freeze for dramatic impact
+          setTimeout(() => { slowMo = 1.0; }, 85);
+
+          Sound.playTalonStrike(currentSpd / MAX_STOOP_SPEED, isPerfect);
+          spawnShockwave(hitTarget.x, hitTarget.y, isPerfect ? 95 : 55, isPerfect ? '#ffe066' : '#ffffff');
+          spawnFeatherBurst(hitTarget.x, hitTarget.y, isPerfect ? 30 : 16, config.color);
+
+          const label = isPerfect ? `PERFECT TALON! +${pts}` : `TALON STRIKE! +${pts}`;
+          const sub = isPerfect ? `${Math.floor(currentSpd)} km/h • Pinpoint Altitude` : `${Math.floor(currentSpd)} km/h`;
+          addPopup(hitTarget.x, hitTarget.y - 30, label, isPerfect ? '#fcc419' : '#38d9a9', isPerfect ? 1.3 : 1.0, sub);
+
+          // Remove prey
+          const idx = preys.indexOf(hitTarget);
+          if (idx !== -1) preys.splice(idx, 1);
+
+          // Wave progress
+          waveProgress++;
+          if (waveProgress >= waveTarget) {
+            advanceWave();
+          }
+
+          // Check frenzy activation
+          if (combo >= 5 && frenzyTimer <= 0) {
+            frenzyTimer = 8.0;
+            screenShake = 16;
+            Sound.playSonicBoom();
+            addPopup(W * 0.5, H * 0.35, 'APEX FRENZY!', '#ff922b', 1.5, '3X POINTS & SLOWDOWN');
+          }
+
+          if (onboardingActive) onboardingActive = false;
+        } else {
+          // Missed prey on ground
+          addPopup(this.x, this.y - 20, 'MISS!', '#94a3b8', 0.9, 'No target aligned');
+          combo = 0;
+        }
+      }
+    };
+
+    // --- PROCEDURAL GENERATION: PILLARS, THERMALS, PREYS ---
+    function spawnPillars() {
+      pillars = [];
+      const count = 4 + currentWave * 2;
+      for (let i = 0; i < count; i++) {
+        pillars.push({
+          x: 60 + Math.random() * (W - 120),
+          y: Math.random() * H,
+          radius: 28 + Math.random() * 32,
+          height: 90 + Math.random() * 110
+        });
+      }
+    }
+
+    function spawnThermals() {
+      thermals = [];
+      const count = 2;
+      for (let i = 0; i < count; i++) {
+        thermals.push({
+          x: 80 + Math.random() * (W - 160),
+          y: 80 + Math.random() * (H - 260),
+          radius: 46,
+          pulse: Math.random() * Math.PI * 2
+        });
+      }
+    }
+
+    function spawnPreyBatch() {
+      preys = [];
+      const count = 3 + Math.min(6, currentWave);
+      for (let i = 0; i < count; i++) {
+        spawnSinglePrey();
+      }
+    }
+
+    function spawnSinglePrey() {
+      // Pick type based on wave & rarity
+      let type = 'HARE';
+      const r = Math.random();
+      if (frenzyTimer > 0 && Math.random() < 0.45) {
+        type = 'PHOENIX';
+      } else if (currentWave >= 3 && r < 0.22) {
+        type = 'ARMADILLO';
+      } else if (currentWave >= 2 && r < 0.45) {
+        type = 'VIPER';
+      } else if (r < 0.7) {
+        type = 'SALMON';
+      }
+
+      preys.push({
+        type: type,
+        x: 60 + Math.random() * (W - 120),
+        y: 80 + Math.random() * (H - 220),
+        vx: (Math.random() - 0.5) * PREY_CONFIG[type].speed,
+        vy: (Math.random() - 0.5) * PREY_CONFIG[type].speed,
+        size: PREY_CONFIG[type].size,
+        wiggle: Math.random() * Math.PI * 2,
+        changeTimer: 1 + Math.random() * 2
+      });
+    }
+
+    function advanceWave() {
+      currentWave++;
+      waveProgress = 0;
+      screenShake = 12;
+      Sound.playThermalGain();
+      const biome = BIOMES[(currentWave - 1) % BIOMES.length];
+      addPopup(W * 0.5, H * 0.38, `WAVE ${currentWave}: ${biome.name}`, '#69db7c', 1.35, 'Prey speeds increased!');
+      spawnPillars();
+      spawnThermals();
+      spawnPreyBatch();
+    }
+
+    function triggerGameOver() {
+      gameState = STATES.GAMEOVER;
+      gameOverTimer = 0;
+      Sound.playCrash();
+      if (!gameOverSaved) {
+        gameOverSaved = true;
+        lastSaveResult = saveScore(score, Falcon.speed, combo);
+      }
+    }
+
+    function resetGame() {
+      score = 0;
+      displayScore = 0;
+      combo = 0;
+      comboTimer = 0;
+      hearts = 3;
+      currentWave = 1;
+      waveProgress = 0;
+      gameTime = 0;
+      screenShake = 0;
+      slowMo = 1.0;
+      frenzyTimer = 0;
+      gameOverSaved = false;
+      gameOverTimer = 0;
+      lastSaveResult = null;
+      particles = [];
+      popups = [];
+      speedLines = [];
+
+      Falcon.reset();
+      spawnPillars();
+      spawnThermals();
+      spawnPreyBatch();
+      gameState = STATES.PLAYING;
+    }
+
+    // --- INPUT HANDLING (Touch, Mouse, Keyboard) ---
+    const Input = {
+      isDown: false,
+      pointerX: W * 0.5,
+      pointerY: H * 0.65,
+
+      onDown(x, y) {
+        Sound.init();
+        Sound.resume();
+
+        if (gameState === STATES.START) {
+          resetGame();
+          return;
+        }
+
+        if (gameState === STATES.GAMEOVER) {
+          if (gameOverTimer > 0.8) {
+            resetGame();
+          }
+          return;
+        }
+
+        if (gameState === STATES.PLAYING) {
+          this.isDown = true;
+          this.pointerX = x;
+          this.pointerY = y;
+          Falcon.targetX = x;
+          Falcon.targetY = y;
+          Falcon.isStooping = true;
+          Falcon.stoopDuration = 0;
+        }
+      },
+
+      onMove(x, y) {
+        this.pointerX = x;
+        this.pointerY = y;
+        if (gameState === STATES.PLAYING) {
+          Falcon.targetX = x;
+          Falcon.targetY = y;
+        }
+      },
+
+      onUp() {
+        if (gameState === STATES.PLAYING && this.isDown) {
+          this.isDown = false;
+          Falcon.strike();
+        }
+      }
+    };
+
+    // Canvas pointer listeners
+    canvas.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      canvas.setPointerCapture(e.pointerId);
+      const rect = canvas.getBoundingClientRect();
+      Input.onDown(e.clientX - rect.left, e.clientY - rect.top);
+    });
+
+    canvas.addEventListener('pointermove', (e) => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      Input.onMove(e.clientX - rect.left, e.clientY - rect.top);
+    });
+
+    canvas.addEventListener('pointerup', (e) => {
+      e.preventDefault();
+      Input.onUp();
+    });
+
+    canvas.addEventListener('pointercancel', (e) => {
+      e.preventDefault();
+      Input.onUp();
+    });
+
+    // Keyboard controls for desktop
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Space' || e.code === 'Enter') {
+        if (!e.repeat) {
+          if (gameState === STATES.START) resetGame();
+          else if (gameState === STATES.GAMEOVER && gameOverTimer > 0.8) resetGame();
+          else if (gameState === STATES.PLAYING && !Input.isDown) {
+            Input.isDown = true;
+            Falcon.isStooping = true;
+          }
+        }
+      }
+      const step = 28;
+      if (gameState === STATES.PLAYING) {
+        if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') Falcon.targetX -= step;
+        if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') Falcon.targetX += step;
+        if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') Falcon.targetY -= step;
+        if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') Falcon.targetY += step;
+      }
+    });
+
+    window.addEventListener('keyup', (e) => {
+      if (e.code === 'Space') {
+        if (gameState === STATES.PLAYING && Input.isDown) {
+          Input.isDown = false;
+          Falcon.strike();
+        }
+      }
+    });
+
+    // Handle blur and visibility change safely
+    window.addEventListener('blur', () => {
+      Input.isDown = false;
+      if (Falcon.isStooping) Falcon.isStooping = false;
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        Input.isDown = false;
+        if (Falcon.isStooping) Falcon.isStooping = false;
+      }
+    });
+
+    // --- DRAWING UTILITIES & RENDER PIPELINE ---
+    function drawVignette() {
+      const grad = ctx.createRadialGradient(W * 0.5, H * 0.5, Math.min(W, H) * 0.4, W * 0.5, H * 0.5, Math.max(W, H) * 0.8);
+      grad.addColorStop(0, 'rgba(0,0,0,0)');
+      grad.addColorStop(1, 'rgba(4, 8, 14, 0.7)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    function drawTerrain(dt) {
+      const biome = BIOMES[(currentWave - 1) % BIOMES.length];
+      
+      // Ground perspective base
+      const groundGrad = ctx.createLinearGradient(0, 0, 0, H);
+      groundGrad.addColorStop(0, biome.ground1);
+      groundGrad.addColorStop(1, biome.ground2);
+      ctx.fillStyle = groundGrad;
+      ctx.fillRect(0, 0, W, H);
+
+      // Perspective altitude grid lines
+      const altZoom = 0.5 + (1 - Falcon.alt / CEILING_ALT) * 0.6;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
+      ctx.lineWidth = 1;
+      const gridSize = 64 * altZoom;
+      const offX = (Falcon.x * 0.15) % gridSize;
+      const offY = (Falcon.y * 0.15) % gridSize;
+      
+      ctx.beginPath();
+      for (let x = -gridSize; x < W + gridSize; x += gridSize) {
+        ctx.moveTo(x - offX, 0);
+        ctx.lineTo(x - offX, H);
+      }
+      for (let y = -gridSize; y < H + gridSize; y += gridSize) {
+        ctx.moveTo(0, y - offY);
+        ctx.lineTo(W, y - offY);
+      }
+      ctx.stroke();
+      ctx.restore();
+
+      // Draw rock pillars with pseudo-3D extrusion
+      for (let i = 0; i < pillars.length; i++) {
+        const p = pillars[i];
+        // Cast shadow
+        ctx.beginPath();
+        ctx.ellipse(p.x + 12, p.y + 16, p.radius * 1.1, p.radius * 0.75, 0.3, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fill();
+
+        // Pillar column
+        const pillarGrad = ctx.createLinearGradient(p.x - p.radius, p.y, p.x + p.radius, p.y);
+        pillarGrad.addColorStop(0, '#2b3035');
+        pillarGrad.addColorStop(0.5, biome.rock);
+        pillarGrad.addColorStop(1, '#1a1d20');
+
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+        ctx.fillStyle = pillarGrad;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Pillar top rim
+        ctx.beginPath();
+        ctx.arc(p.x - 3, p.y - 3, p.radius * 0.7, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,255,255,0.06)';
+        ctx.fill();
+      }
+
+      // Draw thermals (updraft vortices)
+      for (let i = 0; i < thermals.length; i++) {
+        const t = thermals[i];
+        t.pulse += dt * 3;
+        const r = t.radius + Math.sin(t.pulse) * 6;
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, r, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(100, 220, 255, 0.32)';
+        ctx.lineWidth = 2.5;
+        ctx.setLineDash([8, 6]);
+        ctx.lineDashOffset = -t.pulse * 12;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, r * 0.55, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255, 230, 100, 0.4)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.restore();
+
+        // Collision with thermal when cruising
+        if (Math.hypot(Falcon.x - t.x, Falcon.y - t.y) < t.radius && !Falcon.isStooping && Falcon.alt < CEILING_ALT) {
+          Falcon.alt = Math.min(CEILING_ALT, Falcon.alt + 320 * dt);
+          if (Math.random() < 0.2) {
+            Sound.playThermalGain();
+            spawnShockwave(t.x, t.y, 35, 'rgba(100, 220, 255, 0.5)');
+          }
+        }
+      }
+    }
+
+    function updateAndDrawPreys(dt) {
+      for (let i = preys.length - 1; i >= 0; i--) {
+        const p = preys[i];
+        p.wiggle += dt * 6;
+        p.changeTimer -= dt;
+
+        if (p.changeTimer <= 0) {
+          p.changeTimer = 1.2 + Math.random() * 2;
+          const spd = PREY_CONFIG[p.type].speed;
+          const ang = Math.random() * Math.PI * 2;
+          p.vx = Math.cos(ang) * spd;
+          p.vy = Math.sin(ang) * spd;
+        }
+
+        // Flee behavior if falcon is stooping nearby
+        if (Falcon.isStooping && Falcon.alt < 350) {
+          const dx = p.x - Falcon.x;
+          const dy = p.y - Falcon.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist < 180 && dist > 1) {
+            const fleeSpd = PREY_CONFIG[p.type].speed * 1.6;
+            p.vx = (dx / dist) * fleeSpd;
+            p.vy = (dy / dist) * fleeSpd;
+          }
+        }
+
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+
+        // Bounce inside arena boundaries
+        if (p.x < 50) { p.x = 50; p.vx *= -1; }
+        if (p.x > W - 50) { p.x = W - 50; p.vx *= -1; }
+        if (p.y < 70) { p.y = 70; p.vy *= -1; }
+        if (p.y > H - 70) { p.y = H - 70; p.vy *= -1; }
+
+        // Render prey
+        const conf = PREY_CONFIG[p.type];
+
+        // Target reticle cue if falcon is stooping
+        if (Falcon.isStooping) {
+          const distToFalcon = Math.hypot(p.x - Falcon.x, p.y - Falcon.y);
+          if (distToFalcon < 110) {
+            ctx.save();
+            ctx.strokeStyle = Falcon.alt <= STRIKE_MAX_ALT && Falcon.alt >= STRIKE_PERFECT_MIN ? '#fcc419' : 'rgba(255,255,255,0.4)';
+            ctx.lineWidth = 1.8;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size + 10 + Math.sin(p.wiggle) * 2, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Crosshair ticks
+            ctx.beginPath();
+            ctx.moveTo(p.x - p.size - 14, p.y);
+            ctx.lineTo(p.x - p.size - 6, p.y);
+            ctx.moveTo(p.x + p.size + 6, p.y);
+            ctx.lineTo(p.x + p.size + 14, p.y);
+            ctx.moveTo(p.x, p.y - p.size - 14);
+            ctx.lineTo(p.x, p.y - p.size - 6);
+            ctx.moveTo(p.x, p.y + p.size + 6);
+            ctx.lineTo(p.x, p.y + p.size + 14);
+            ctx.stroke();
+            ctx.restore();
+          }
+        }
+
+        // Cast prey shadow
+        ctx.beginPath();
+        ctx.ellipse(p.x + 3, p.y + 4, p.size * 0.7, p.size * 0.45, 0, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.fill();
+
+        // Prey body
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        const heading = Math.atan2(p.vy, p.vx);
+        ctx.rotate(heading);
+
+        ctx.fillStyle = conf.color;
+        if (p.type === 'SALMON') {
+          // Fish shape
+          ctx.beginPath();
+          ctx.ellipse(0, 0, p.size * 1.1, p.size * 0.55, 0, 0, Math.PI * 2);
+          ctx.fill();
+          // Tail fin
+          ctx.beginPath();
+          ctx.moveTo(-p.size * 0.9, 0);
+          ctx.lineTo(-p.size * 1.4, -p.size * 0.45);
+          ctx.lineTo(-p.size * 1.4, p.size * 0.45);
+          ctx.closePath();
+          ctx.fill();
+        } else if (p.type === 'VIPER') {
+          // Coiled snake segments
+          for (let s = -2; s <= 2; s++) {
+            ctx.beginPath();
+            ctx.arc(s * 5, Math.sin(p.wiggle + s) * 4, p.size * 0.35, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        } else if (p.type === 'ARMADILLO') {
+          // Armored round shell
+          ctx.beginPath();
+          ctx.arc(0, 0, p.size * 0.8, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = '#343a40';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        } else if (p.type === 'PHOENIX') {
+          // Glowing mythical bird
+          ctx.shadowColor = '#fcc419';
+          ctx.shadowBlur = 14;
+          ctx.beginPath();
+          ctx.arc(0, 0, p.size * 0.85, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.shadowBlur = 0;
+        } else {
+          // Hare
+          ctx.beginPath();
+          ctx.ellipse(0, 0, p.size, p.size * 0.6, 0, 0, Math.PI * 2);
+          ctx.fill();
+          // Ears
+          ctx.fillStyle = '#ffc078';
+          ctx.beginPath();
+          ctx.ellipse(p.size * 0.7, -p.size * 0.3, 6, 2.5, -0.4, 0, Math.PI * 2);
+          ctx.ellipse(p.size * 0.7, p.size * 0.3, 6, 2.5, 0.4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+
+      // Replenish prey if empty
+      if (preys.length < 2) {
+        spawnSinglePrey();
+      }
+    }
+
+    function drawFalcon() {
+      const altRatio = Falcon.alt / CEILING_ALT; // 1 = sky, 0 = ground
+      const groundDistance = 1 - altRatio; // 0 = sky, 1 = touching ground
+
+      // --- 1. Cast Shadow on Ground ---
+      // Ground shadow converges directly onto the falcon as altitude reaches 0
+      const shadowOffsetX = 35 * altRatio;
+      const shadowOffsetY = 45 * altRatio;
+      const shadowBlur = 2 + 18 * altRatio;
+      const shadowScale = 0.5 + 0.5 * groundDistance;
+      const shadowAlpha = 0.2 + 0.5 * groundDistance;
+
+      ctx.save();
+      ctx.translate(Falcon.x + shadowOffsetX, Falcon.y + shadowOffsetY);
+      ctx.scale(shadowScale, shadowScale * 0.7);
+      ctx.rotate(Falcon.tilt * 0.4);
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 24 * Falcon.wingSpread + 8, 16, 0, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(0, 0, 0, ${shadowAlpha})`;
+      ctx.fill();
+      ctx.restore();
+
+      // --- 2. Target Reticle / Strike Cone below falcon when diving ---
+      if (Falcon.isStooping) {
+        ctx.save();
+        ctx.translate(Falcon.x, Falcon.y);
+        
+        // Dynamic target ring that shrinks as altitude drops to zero
+        const targetRadius = 24 + altRatio * 60;
+        let ringColor = 'rgba(255, 255, 255, 0.3)';
+        let lineWidth = 1.5;
+
+        if (Falcon.alt <= STRIKE_MAX_ALT && Falcon.alt > STRIKE_PERFECT_MAX) {
+          ringColor = 'rgba(56, 217, 169, 0.75)'; // Valid strike zone
+          lineWidth = 2.5;
+        } else if (Falcon.alt <= STRIKE_PERFECT_MAX && Falcon.alt >= STRIKE_PERFECT_MIN) {
+          ringColor = 'rgba(246, 196, 69, 0.95)'; // PERFECT zone
+          lineWidth = 3.5;
+        } else if (Falcon.alt < STRIKE_PERFECT_MIN) {
+          ringColor = 'rgba(255, 71, 87, 0.9)'; // DANGER crash zone
+          lineWidth = 3;
+        }
+
+        ctx.strokeStyle = ringColor;
+        ctx.lineWidth = lineWidth;
+        ctx.beginPath();
+        ctx.arc(0, 0, targetRadius, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Crosshairs
+        ctx.beginPath();
+        ctx.moveTo(-targetRadius - 8, 0);
+        ctx.lineTo(-targetRadius + 6, 0);
+        ctx.moveTo(targetRadius - 6, 0);
+        ctx.lineTo(targetRadius + 8, 0);
+        ctx.moveTo(0, -targetRadius - 8);
+        ctx.lineTo(0, -targetRadius + 6);
+        ctx.moveTo(0, targetRadius - 6);
+        ctx.lineTo(0, targetRadius + 8);
+        ctx.stroke();
+
+        ctx.restore();
+      }
+
+      // --- 3. Falcon Body (2.5D Shaded Art) ---
+      ctx.save();
+      ctx.translate(Falcon.x, Falcon.y);
+      ctx.rotate(Falcon.tilt);
+
+      // Depth scale of the falcon itself
+      const bodyScale = 0.85 + (1 - altRatio) * 0.45;
+      ctx.scale(bodyScale, bodyScale);
+
+      // Wing parameters based on wingSpread
+      const span = 42 * Falcon.wingSpread;
+      const wingSweep = Falcon.isStooping ? 18 : 6;
+
+      // Left Wing
+      const leftWingGrad = ctx.createLinearGradient(-span, 0, 0, 0);
+      leftWingGrad.addColorStop(0, '#1e293b');
+      leftWingGrad.addColorStop(0.5, '#334155');
+      leftWingGrad.addColorStop(1, '#64748b');
+
+      ctx.fillStyle = leftWingGrad;
+      ctx.beginPath();
+      ctx.moveTo(-4, -6);
+      ctx.quadraticCurveTo(-span * 0.6, -wingSweep - 4, -span, wingSweep * 0.8);
+      ctx.quadraticCurveTo(-span * 0.5, wingSweep + 14, 0, 10);
+      ctx.closePath();
+      ctx.fill();
+
+      // Left Wing Primary Feathers (tips)
+      ctx.strokeStyle = '#0f172a';
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+
+      // Right Wing
+      const rightWingGrad = ctx.createLinearGradient(span, 0, 0, 0);
+      rightWingGrad.addColorStop(0, '#1e293b');
+      rightWingGrad.addColorStop(0.5, '#334155');
+      rightWingGrad.addColorStop(1, '#64748b');
+
+      ctx.fillStyle = rightWingGrad;
+      ctx.beginPath();
+      ctx.moveTo(4, -6);
+      ctx.quadraticCurveTo(span * 0.6, -wingSweep - 4, span, wingSweep * 0.8);
+      ctx.quadraticCurveTo(span * 0.5, wingSweep + 14, 0, 10);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      // Tail Feathers (wedge shape)
+      ctx.fillStyle = '#1e293b';
+      ctx.beginPath();
+      ctx.moveTo(-6, 8);
+      ctx.lineTo(-10 * Falcon.wingSpread, 22);
+      ctx.lineTo(10 * Falcon.wingSpread, 22);
+      ctx.lineTo(6, 8);
+      ctx.closePath();
+      ctx.fill();
+
+      // Falcon Torso / Keel
+      const bodyGrad = ctx.createRadialGradient(0, -2, 2, 0, 0, 16);
+      bodyGrad.addColorStop(0, '#f8fafc'); // White/buff breast plumage
+      bodyGrad.addColorStop(0.4, '#e2e8f0');
+      bodyGrad.addColorStop(0.8, '#475569');
+      bodyGrad.addColorStop(1, '#1e293b');
+
+      ctx.fillStyle = bodyGrad;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 9, 17, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Slate Head & Black Malar Stripe (facial tear strip)
+      ctx.fillStyle = '#0f172a';
+      ctx.beginPath();
+      ctx.arc(0, -12, 6.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Malar stripes
+      ctx.fillStyle = '#020617';
+      ctx.beginPath();
+      ctx.moveTo(-3, -10);
+      ctx.lineTo(-7, -4);
+      ctx.lineTo(-3, -5);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.moveTo(3, -10);
+      ctx.lineTo(7, -4);
+      ctx.lineTo(3, -5);
+      ctx.closePath();
+      ctx.fill();
+
+      // Golden Beak & Cere
+      ctx.fillStyle = '#f59f00';
+      ctx.beginPath();
+      ctx.moveTo(-2.5, -16);
+      ctx.lineTo(2.5, -16);
+      ctx.lineTo(0, -22);
+      ctx.closePath();
+      ctx.fill();
+
+      // Golden Talons (extended forward during strike/stoop)
+      if (Falcon.isStooping || Falcon.flaring) {
+        ctx.fillStyle = '#f59f00';
+        ctx.beginPath();
+        ctx.arc(-5, 6, 3, 0, Math.PI * 2);
+        ctx.arc(5, 6, 3, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Sharp curved black claws
+        ctx.strokeStyle = '#020617';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(-5, 8);
+        ctx.lineTo(-6, 12);
+        ctx.moveTo(5, 8);
+        ctx.lineTo(6, 12);
+        ctx.stroke();
+      }
+
+      // Golden Eyes
+      ctx.fillStyle = '#fcc419';
+      ctx.beginPath();
+      ctx.arc(-3.5, -13, 1.8, 0, Math.PI * 2);
+      ctx.arc(3.5, -13, 1.8, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#000';
+      ctx.beginPath();
+      ctx.arc(-3.5, -13, 0.9, 0, Math.PI * 2);
+      ctx.arc(3.5, -13, 0.9, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    function updateAndDrawParticles(dt) {
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.life -= dt;
+        if (p.life <= 0) {
+          particles.splice(i, 1);
+          continue;
+        }
+
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        const alpha = Math.max(0, p.life / p.maxLife);
+
+        ctx.save();
+        if (p.shape === 'ring') {
+          const currentRadius = p.size * (1 + (1 - alpha) * 1.5);
+          ctx.strokeStyle = p.color;
+          ctx.globalAlpha = alpha;
+          ctx.lineWidth = 3 * alpha;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, currentRadius, 0, Math.PI * 2);
+          ctx.stroke();
+        } else if (p.shape === 'feather') {
+          ctx.fillStyle = p.color;
+          ctx.globalAlpha = alpha;
+          ctx.beginPath();
+          ctx.ellipse(p.x, p.y, p.size, p.size * 0.35, p.vx * 0.05, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (p.shape === 'line') {
+          ctx.strokeStyle = p.color;
+          ctx.globalAlpha = alpha;
+          ctx.lineWidth = p.size;
+          ctx.beginPath();
+          ctx.moveTo(p.x, p.y);
+          ctx.lineTo(p.x, p.y + 18);
+          ctx.stroke();
+        } else {
+          ctx.fillStyle = p.color;
+          ctx.globalAlpha = alpha;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * alpha, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+    }
+
+    function updateAndDrawPopups(dt) {
+      for (let i = popups.length - 1; i >= 0; i--) {
+        const pop = popups[i];
+        pop.life -= dt;
+        if (pop.life <= 0) {
+          popups.splice(i, 1);
+          continue;
+        }
+        pop.y += pop.vy * dt;
+        const alpha = Math.min(1, pop.life * 1.5);
+
+        ctx.save();
+        ctx.textAlign = 'center';
+        ctx.globalAlpha = alpha;
+        
+        // Main text
+        const fontSize = Math.floor(20 * pop.scale);
+        ctx.font = `900 ${fontSize}px sans-serif`;
+        ctx.fillStyle = '#020617';
+        ctx.fillText(pop.text, pop.x + 1, pop.y + 1);
+        ctx.fillStyle = pop.color;
+        ctx.fillText(pop.text, pop.x, pop.y);
+
+        // Subtitle text if present
+        if (pop.subtitle) {
+          const subSize = Math.max(11, Math.floor(12 * pop.scale));
+          ctx.font = `700 ${subSize}px sans-serif`;
+          ctx.fillStyle = '#ffffff';
+          ctx.fillText(pop.subtitle, pop.x, pop.y + fontSize * 0.85);
+        }
+        ctx.restore();
+      }
+    }
+
+    // --- HUD & METERS ---
+    function drawHUD() {
+      const pad = 16;
+      const topY = safeTop + pad;
+
+      // 1. Top Bar: Score & Multiplier
+      ctx.save();
+      ctx.textAlign = 'left';
+      ctx.font = '900 24px sans-serif';
+      ctx.fillStyle = '#ffffff';
+      // Smooth score rolling
+      displayScore += (score - displayScore) * 0.15;
+      ctx.fillText(Math.floor(displayScore).toLocaleString(), pad, topY + 20);
+
+      // Score Label
+      ctx.font = '700 11px sans-serif';
+      ctx.fillStyle = 'var(--text-sub)';
+      ctx.fillText('SCORE', pad, topY + 34);
+
+      // Combo Pill
+      if (combo > 1) {
+        const pillX = pad + 110;
+        const pillY = topY + 4;
+        ctx.fillStyle = combo >= 5 ? 'rgba(255, 146, 43, 0.95)' : 'rgba(56, 217, 169, 0.85)';
+        ctx.beginPath();
+        ctx.roundRect(pillX, pillY, 74, 26, 13);
+        ctx.fill();
+
+        ctx.fillStyle = '#020617';
+        ctx.font = '900 13px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${combo}X STREAK`, pillX + 37, pillY + 18);
+      }
+
+      // 2. Hearts (Lives) on Right
+      const rightX = W - pad;
+      ctx.textAlign = 'right';
+      for (let h = 0; h < 3; h++) {
+        const heartX = rightX - h * 26 - 12;
+        const heartY = topY + 14;
+        ctx.font = '18px sans-serif';
+        ctx.fillStyle = h < hearts ? '#ff4757' : 'rgba(255,255,255,0.2)';
+        ctx.fillText('♥', heartX, heartY);
+      }
+
+      // Wave Tracker
+      ctx.font = '700 11px sans-serif';
+      ctx.fillStyle = 'var(--text-sub)';
+      ctx.fillText(`WAVE ${currentWave} (${waveProgress}/${waveTarget})`, rightX, topY + 34);
+
+      // 3. Flight Instruments (Right edge: Altitude Needle Gauge)
+      const gaugeW = 12;
+      const gaugeH = Math.min(220, H * 0.32);
+      const gaugeX = W - pad - gaugeW;
+      const gaugeY = H * 0.45;
+
+      // Gauge background
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.65)';
+      ctx.beginPath();
+      ctx.roundRect(gaugeX, gaugeY, gaugeW, gaugeH, 6);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Strike Zone highlight bands on altitude gauge
+      const normStrikeMax = 1 - (STRIKE_MAX_ALT / CEILING_ALT);
+      const normStrikePerf = 1 - (STRIKE_PERFECT_MAX / CEILING_ALT);
+      const normStrikeMin = 1 - (STRIKE_PERFECT_MIN / CEILING_ALT);
+
+      // Perfect band
+      ctx.fillStyle = 'rgba(246, 196, 69, 0.7)';
+      ctx.fillRect(gaugeX, gaugeY + normStrikePerf * gaugeH, gaugeW, (normStrikeMin - normStrikePerf) * gaugeH);
+
+      // Falcon Needle indicator
+      const falconNorm = 1 - (Falcon.alt / CEILING_ALT);
+      const needleY = gaugeY + falconNorm * gaugeH;
+
+      ctx.fillStyle = Falcon.isStooping ? '#f6c445' : '#38d9a9';
+      ctx.beginPath();
+      ctx.moveTo(gaugeX - 6, needleY);
+      ctx.lineTo(gaugeX, needleY - 5);
+      ctx.lineTo(gaugeX, needleY + 5);
+      ctx.closePath();
+      ctx.fill();
+
+      // Altitude Text readout
+      ctx.textAlign = 'right';
+      ctx.font = '800 12px sans-serif';
+      ctx.fillStyle = Falcon.alt < 60 ? '#ff4757' : '#f8fafc';
+      ctx.fillText(`${Math.floor(Falcon.alt)}m`, gaugeX - 9, needleY + 4);
+
+      // 4. Speedometer (Left lower corner)
+      const spdY = H - safeBottom - 30;
+      ctx.textAlign = 'left';
+      ctx.font = '900 28px sans-serif';
+      const isOver280 = Falcon.speed > 280;
+      ctx.fillStyle = isOver280 ? '#fcc419' : (Falcon.isStooping ? '#38d9a9' : '#ffffff');
+      ctx.fillText(`${Math.floor(Falcon.speed)}`, pad, spdY);
+
+      ctx.font = '700 11px sans-serif';
+      ctx.fillStyle = 'var(--text-sub)';
+      ctx.fillText('KM / H (STOOP)', pad, spdY + 14);
+
+      // 5. Onboarding Prompt (fades after first strike)
+      if (onboardingActive) {
+        ctx.textAlign = 'center';
+        const boxW = Math.min(320, W - 40);
+        const boxH = 50;
+        const boxX = (W - boxW) * 0.5;
+        const boxY = H - safeBottom - 95;
+
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.88)';
+        ctx.beginPath();
+        ctx.roundRect(boxX, boxY, boxW, boxH, 12);
+        ctx.fill();
+        ctx.strokeStyle = 'var(--gold)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '700 13px sans-serif';
+        ctx.fillText('HOLD to Stoop (Dive) • RELEASE to Strike!', W * 0.5, boxY + 23);
+        ctx.font = '600 11px sans-serif';
+        ctx.fillStyle = 'var(--gold)';
+        ctx.fillText('Release in yellow zone near ground for PERFECT!', W * 0.5, boxY + 40);
+      }
+
+      ctx.restore();
+    }
+
+    // --- OVERLAYS: START SCREEN & GAMEOVER SCREEN ---
+    function drawStartScreen() {
+      ctx.save();
+      // Backdrop tint
+      ctx.fillStyle = 'rgba(10, 17, 24, 0.85)';
+      ctx.fillRect(0, 0, W, H);
+
+      const cx = W * 0.5;
+      const cy = H * 0.44;
+
+      // Title
+      ctx.textAlign = 'center';
+      ctx.font = '900 38px sans-serif';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText('PEREGRINE', cx, cy - 65);
+      ctx.fillStyle = 'var(--gold)';
+      ctx.fillText('STRIKE', cx, cy - 25);
+
+      // Subtitle
+      ctx.font = '600 14px sans-serif';
+      ctx.fillStyle = '#94a3b8';
+      ctx.fillText('Supersonic Apex Raptor Hunting', cx, cy + 8);
+
+      // Instruction badge
+      const badgeW = Math.min(340, W - 48);
+      ctx.fillStyle = 'rgba(30, 41, 59, 0.8)';
+      ctx.beginPath();
+      ctx.roundRect(cx - badgeW * 0.5, cy + 32, badgeW, 86, 14);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+      ctx.stroke();
+
+      ctx.font = '700 13px sans-serif';
+      ctx.fillStyle = '#f8fafc';
+      ctx.fillText('1. DRAG to steer gliding path', cx, cy + 56);
+      ctx.fillText('2. HOLD screen to tuck wings & dive', cx, cy + 78);
+      ctx.fillStyle = 'var(--gold)';
+      ctx.fillText('3. RELEASE in the strike zone to snatch prey!', cx, cy + 100);
+
+      // Play prompt (pulsing)
+      const pulse = 1 + Math.sin(Date.now() * 0.006) * 0.05;
+      ctx.save();
+      ctx.translate(cx, cy + 165);
+      ctx.scale(pulse, pulse);
+      const btnW = 200;
+      const btnH = 48;
+      ctx.fillStyle = 'var(--gold)';
+      ctx.beginPath();
+      ctx.roundRect(-btnW * 0.5, -btnH * 0.5, btnW, btnH, 24);
+      ctx.fill();
+
+      ctx.fillStyle = '#0f172a';
+      ctx.font = '900 16px sans-serif';
+      ctx.fillText('TAP TO HUNT', 0, 6);
+      ctx.restore();
+
+      // High Score from storage
+      const save = loadSaveData();
+      if (save.highScores[0] > 0) {
+        ctx.font = '700 13px sans-serif';
+        ctx.fillStyle = '#64748b';
+        ctx.fillText(`BEST SCORE: ${save.highScores[0].toLocaleString()}  •  MAX SPEED: ${save.maxSpeed} km/h`, cx, cy + 225);
+      }
+
+      ctx.restore();
+    }
+
+    function drawGameOverScreen(dt) {
+      gameOverTimer += dt;
+      ctx.save();
+      // Backdrop
+      ctx.fillStyle = 'rgba(10, 17, 24, 0.9)';
+      ctx.fillRect(0, 0, W, H);
+
+      const cx = W * 0.5;
+      const cy = H * 0.42;
+
+      ctx.textAlign = 'center';
+      ctx.font = '900 32px sans-serif';
+      ctx.fillStyle = '#ff4757';
+      ctx.fillText('HUNT CONCLUDED', cx, cy - 90);
+
+      // Score Panel
+      const panelW = Math.min(350, W - 40);
+      const panelH = 200;
+      ctx.fillStyle = 'rgba(20, 30, 45, 0.88)';
+      ctx.beginPath();
+      ctx.roundRect(cx - panelW * 0.5, cy - 70, panelW, panelH, 16);
+      ctx.fill();
+      ctx.strokeStyle = lastSaveResult && lastSaveResult.isHigh ? 'var(--gold)' : 'rgba(255,255,255,0.12)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      if (lastSaveResult && lastSaveResult.isHigh) {
+        ctx.font = '900 12px sans-serif';
+        ctx.fillStyle = 'var(--gold)';
+        ctx.fillText('★ NEW HIGH SCORE! ★', cx, cy - 48);
+      }
+
+      ctx.font = '900 36px sans-serif';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(Math.floor(score).toLocaleString(), cx, cy - 10);
+
+      ctx.font = '700 12px sans-serif';
+      ctx.fillStyle = '#94a3b8';
+      ctx.fillText('FINAL SCORE', cx, cy + 10);
+
+      // Leaderboard table (Top 3)
+      const save = lastSaveResult ? lastSaveResult.data : loadSaveData();
+      ctx.font = '600 12px sans-serif';
+      ctx.fillStyle = '#cbd5e1';
+      ctx.fillText(`1st: ${save.highScores[0].toLocaleString()}    2nd: ${save.highScores[1].toLocaleString()}    3rd: ${save.highScores[2].toLocaleString()}`, cx, cy + 42);
+
+      ctx.font = '600 12px sans-serif';
+      ctx.fillStyle = '#64748b';
+      ctx.fillText(`Reached Wave ${currentWave}  •  Top Combo: ${save.maxCombo}x`, cx, cy + 64);
+
+      // Retry button (appears after delay to prevent accidental tap-through)
+      if (gameOverTimer > 0.8) {
+        const pulse = 1 + Math.sin(Date.now() * 0.007) * 0.04;
+        ctx.save();
+        ctx.translate(cx, cy + 160);
+        ctx.scale(pulse, pulse);
+        const btnW = 190;
+        const btnH = 46;
+        ctx.fillStyle = 'var(--gold)';
+        ctx.beginPath();
+        ctx.roundRect(-btnW * 0.5, -btnH * 0.5, btnW, btnH, 23);
+        ctx.fill();
+
+        ctx.fillStyle = '#0f172a';
+        ctx.font = '900 15px sans-serif';
+        ctx.fillText('STRIKE AGAIN', 0, 5);
+        ctx.restore();
+      }
+
+      ctx.restore();
+    }
+
+    // --- MAIN GAME LOOP ---
+    function loop(timestamp) {
+      if (!lastTime) lastTime = timestamp;
+      let dt = (timestamp - lastTime) / 1000;
+      lastTime = timestamp;
+
+      // Clamp delta time to avoid tunneling/NaN on tab switches
+      dt = Math.min(0.045, Math.max(0.001, dt));
+      dt *= slowMo;
+
+      gameTime += dt;
+
+      // Screen shake decay
+      if (screenShake > 0) {
+        screenShake = Math.max(0, screenShake - dt * 28);
+      }
+
+      // Frenzy timer decay
+      if (frenzyTimer > 0) {
+        frenzyTimer = Math.max(0, frenzyTimer - dt);
+      }
+
+      // Combo timer decay
+      if (comboTimer > 0) {
+        comboTimer = Math.max(0, comboTimer - dt);
+        if (comboTimer <= 0) combo = 0;
+      }
+
+      // Screen Shake Transform
+      ctx.save();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      if (screenShake > 0) {
+        const sx = (Math.random() - 0.5) * screenShake;
+        const sy = (Math.random() - 0.5) * screenShake;
+        ctx.translate(sx, sy);
+      }
+
+      // Update & Render world
+      drawTerrain(dt);
+
+      if (gameState === STATES.PLAYING) {
+        updateAndDrawPreys(dt);
+        Falcon.update(dt);
+        drawFalcon();
+        updateAndDrawParticles(dt);
+        updateAndDrawPopups(dt);
+        drawVignette();
+        drawHUD();
+      } else if (gameState === STATES.START) {
+        drawFalcon();
+        drawStartScreen();
+      } else if (gameState === STATES.GAMEOVER) {
+        updateAndDrawPreys(dt * 0.3);
+        updateAndDrawParticles(dt);
+        updateAndDrawPopups(dt);
+        drawGameOverScreen(dt);
+      }
+
+      ctx.restore();
+      rAFId = requestAnimationFrame(loop);
+    }
+
+    function startLoop() {
+      if (rAFId) cancelAnimationFrame(rAFId);
+      lastTime = 0;
+      rAFId = requestAnimationFrame(loop);
+    }
+
+    function stopLoop() {
+      if (rAFId) {
+        cancelAnimationFrame(rAFId);
+        rAFId = null;
+      }
+    }
+
+    // Initialize initial game structures
+    Falcon.reset();
+    spawnPillars();
+    spawnThermals();
+    spawnPreyBatch();
+    startLoop();
+
+  })();
+  </script>
+</body>
+</html>

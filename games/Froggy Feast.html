@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Froggy Feast</title>
+<style>
+:root{--bg:#1d6f5a}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#1d6f5a}}
+:root[data-theme="dark"]{--bg:#1d6f5a}
+html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;overscroll-behavior:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+canvas{position:fixed;inset:0;display:block;touch-action:none}
+#probe{position:fixed;top:0;left:0;visibility:hidden;padding-top:env(safe-area-inset-top,0px)}
+</style>
+</head>
+<body>
+<div id="probe"></div>
+<canvas id="c"></canvas>
+<script>
+(() => {
+'use strict';
+const STATES = { START: 0, PLAYING: 1, GAMEOVER: 2 };
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), probe = document.getElementById('probe');
+const TAU = Math.PI * 2;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+};
+let best = parseInt(store.get('froggy.best') || '0', 10) || 0;
+
+/* ---------- canvas ---------- */
+let W, H, dpr, yH, fx, fy, FR, baseR, pTop, pBot, safeTop = 0;
+const sc = y => 0.3 + 0.7 * clamp((y - yH) / (fy - yH), 0, 1);
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 3);
+  W = innerWidth; H = innerHeight;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  safeTop = probe.offsetHeight || 0;
+  yH = Math.max(H * 0.26, safeTop + 105); fx = W / 2; fy = H * 0.9; FR = Math.min(W, H) * 0.11; baseR = Math.min(W, H) * 0.03;
+  pTop = yH + 30; pBot = fy - FR * 2.1;
+}
+addEventListener('resize', resize);
+addEventListener('orientationchange', () => setTimeout(resize, 120));
+
+/* ---------- audio ---------- */
+let AC = null;
+function audio() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { AC = null; } }
+  if (AC && AC.state === 'suspended') AC.resume();
+  return AC;
+}
+function tone(type, f0, f1, dur, vol, delay) {
+  const a = audio(); if (!a) return;
+  try {
+    const o = a.createOscillator(), g = a.createGain(), t = a.currentTime + (delay || 0);
+    o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(a.destination); o.start(t); o.stop(t + dur + 0.03);
+  } catch (e) {}
+}
+const sfx = {
+  shoot() { tone('sine', 300, 1000, 0.09, 0.1); },
+  eat(n) { const b = 500 * Math.pow(1.0595, n * 3); tone('triangle', b, b * 1.5, 0.1, 0.13); tone('triangle', b * 1.5, b * 2, 0.15, 0.13, 0.08); },
+  bop() { tone('square', 200, 80, 0.15, 0.12); },
+  sting() { tone('sawtooth', 500, 70, 0.3, 0.14); },
+  starve() { tone('sawtooth', 180, 60, 0.4, 0.12); },
+  over() { tone('sawtooth', 380, 35, 0.9, 0.14); tone('square', 190, 25, 1, 0.09, 0.1); },
+  start() { tone('triangle', 330, 660, 0.14, 0.1); }
+};
+
+/* ---------- state ---------- */
+let state = STATES.START, G, raf = 0, last = 0, overAt = 0, reason = '';
+const decor = { pads: [], reeds: [], trees: [] };
+function initDecor() {
+  decor.pads = Array.from({ length: 8 }, () => ({ x: Math.random() * W, y: pTop + Math.random() * (pBot - pTop), r: 0.8 + Math.random() * 0.6, f: Math.random() < 0.4 }));
+  decor.reeds = Array.from({ length: 10 }, (_, i) => ({ x: i % 2 ? W - Math.random() * W * 0.12 : Math.random() * W * 0.12, y: yH + 10 + Math.random() * (fy - yH) * 0.6, h: 0.6 + Math.random() * 0.6 }));
+  decor.trees = Array.from({ length: 18 }, (_, i) => ({ x: i / 17 * W + (Math.random() - .5) * 30, h: 40 + Math.random() * 60, w: 22 + Math.random() * 26 }));
+}
+function mkEnt(k) {
+  const x = W * 0.08 + Math.random() * W * 0.84, y = pTop + Math.random() * (pBot - pTop - 40);
+  return { k, x, y, a: Math.random() * TAU, sp: k === 'gold' ? 130 : k === 'wasp' ? 28 + 6 * G.level : 45 + Math.random() * 45, ph: Math.random() * TAU, caught: false, stun: 0 };
+}
+function resetGame() {
+  G = { score: 0, lives: 3, hunger: 1, level: 0, eaten: 0, ents: [], tg: { st: 0, len: 0, tl: 0, dx: 0, dy: -1, caught: [], stun: 0, cd: 0 }, aimX: W / 2, aimY: H * 0.4, parts: [], popups: [], ripples: [], shake: 0, spawnT: 0, t: 0, tapped: false, hurt: 0, open: 0 };
+  for (let i = 0; i < 5; i++) G.ents.push(mkEnt('fly'));
+}
+
+/* ---------- loop (single pointer) ---------- */
+function stopLoop() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+function startLoop() { stopLoop(); last = performance.now(); raf = requestAnimationFrame(frame); }
+function frame(now) {
+  raf = requestAnimationFrame(frame);
+  const dt = Math.min(0.05, Math.max(0, (now - last) / 1000)); last = now;
+  update(dt); draw(now);
+}
+document.addEventListener('visibilitychange', () => { document.hidden ? stopLoop() : startLoop(); });
+function startGame() { stopLoop(); resetGame(); state = STATES.PLAYING; sfx.start(); startLoop(); }
+
+/* ---------- logic ---------- */
+const pop = (t, col, x, y) => G.popups.push({ t, col, x, y, life: 1 });
+function puff(x, y, n, cols) { for (let i = 0; i < n; i++) { const a = Math.random() * TAU, s = 50 + Math.random() * 150; G.parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 40, life: 0.4 + Math.random() * 0.5, col: cols[i % cols.length], sz: 2 + Math.random() * 3 }); } }
+function finish(why) {
+  state = STATES.GAMEOVER; reason = why; overAt = performance.now(); sfx.over(); G.shake = 1;
+  const s = Math.floor(G.score); if (s > best) { best = s; store.set('froggy.best', String(best)); }
+}
+function hurt(msg) {
+  const g = G; g.lives--; g.hurt = 0.5; g.shake = 0.8; pop(msg, '#ff6a5a', fx, fy - FR * 2.5);
+  if (g.lives <= 0) finish(msg === 'STARVING!' ? 'STARVED' : 'STUNG TOO MANY TIMES');
+}
+function segDist(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy, t = l2 ? clamp(((px - ax) * dx + (py - ay) * dy) / l2, 0, 1) : 0;
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+const mouth = () => ({ x: fx, y: fy - FR * 0.5 });
+function shoot(x, y) {
+  const g = G, t = g.tg; if (state !== STATES.PLAYING || t.st !== 0 || t.cd > 0) return;
+  const m = mouth(), dx = x - m.x, dy = Math.min(y, m.y - 20) - m.y, d = Math.hypot(dx, dy);
+  if (d < 12) return;
+  t.dx = dx / d; t.dy = dy / d; t.tl = Math.min(d + 30, fy - yH + 20); t.len = 0; t.st = 1; t.caught = []; t.stun = 0; g.tapped = true; g.open = 1; sfx.shoot();
+  g.ripples.push({ x, y: clamp(y, pTop, pBot), age: 0 });
+}
+function eatCaught() {
+  const g = G, t = g.tg, n = t.caught.length; t.st = 0; t.len = 0; g.open = 0;
+  if (!n) return;
+  let sum = 0; for (const e of t.caught) sum += e.k === 'gold' ? 50 : 10;
+  const pts = sum * n; g.score += pts; g.eaten += n; g.level = Math.floor(g.eaten / 10);
+  g.hunger = clamp(g.hunger + 0.15 * n + t.caught.filter(e => e.k === 'gold').length * 0.2, 0, 1);
+  g.ents = g.ents.filter(e => !t.caught.includes(e)); sfx.eat(n);
+  const m = mouth(); pop((n > 1 ? 'x' + n + ' COMBO! ' : '') + '+' + pts, n > 1 ? '#fff3a0' : '#ffffff', m.x, m.y - FR * 1.5); puff(m.x, m.y, 8 + n * 4, ['#ffe28a', '#fff']);
+  t.caught = [];
+}
+function update(dt) {
+  const g = G; g.t += dt; g.shake = Math.max(0, g.shake - dt * 2.5); g.hurt = Math.max(0, g.hurt - dt);
+  for (let i = g.parts.length - 1; i >= 0; i--) { const p = g.parts[i]; p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.98; p.vy = p.vy * 0.98 + 200 * dt; if (p.life <= 0) g.parts.splice(i, 1); }
+  for (let i = g.popups.length - 1; i >= 0; i--) { const p = g.popups[i]; p.life -= dt * 0.9; p.y -= dt * 34; if (p.life <= 0) g.popups.splice(i, 1); }
+  for (let i = g.ripples.length - 1; i >= 0; i--) { g.ripples[i].age += dt; if (g.ripples[i].age > 1.2) g.ripples.splice(i, 1); }
+  if (Math.random() < dt * 0.8) g.ripples.push({ x: Math.random() * W, y: pTop + Math.random() * (pBot - pTop), age: 0.4 });
+  /* creatures wander (also on start screen) */
+  for (const e of g.ents) {
+    if (e.caught) continue;
+    e.ph += dt * 6; e.stun = Math.max(0, e.stun - dt);
+    if (e.k === 'wasp' && state === STATES.PLAYING && e.stun <= 0) {
+      let df = Math.atan2(fy - FR - e.y, fx - e.x) - e.a; df = Math.atan2(Math.sin(df), Math.cos(df)); e.a += clamp(df, -1, 1) * dt * 0.9 + (Math.random() - .5) * dt * 2;
+    } else e.a += (Math.random() - .5) * 4 * dt;
+    const s = e.sp * (0.6 + 0.4 * sc(e.y)) * (e.stun > 0 ? 0.3 : 1);
+    e.x += Math.cos(e.a) * s * dt; e.y += Math.sin(e.a) * s * dt;
+    if (e.x < W * 0.05) { e.x = W * 0.05; e.a = Math.PI - e.a; } if (e.x > W * 0.95) { e.x = W * 0.95; e.a = Math.PI - e.a; }
+    if (e.y < pTop) { e.y = pTop; e.a = -e.a; } if (e.y > pBot + (e.k === 'wasp' ? FR * 2 : 0)) { e.y = pBot + (e.k === 'wasp' ? FR * 2 : 0); e.a = -e.a; }
+  }
+  if (state !== STATES.PLAYING) return;
+  g.hunger -= dt * Math.min(0.09, 0.045 + 0.004 * g.level);
+  if (g.hunger <= 0) { g.hunger = 0.6; sfx.starve(); hurt('STARVING!'); if (state !== STATES.PLAYING) return; }
+  /* spawning */
+  g.spawnT -= dt;
+  const nFly = ents => g.ents.filter(e => e.k === ents).length;
+  if (g.spawnT <= 0) {
+    g.spawnT = 0.7;
+    if (nFly('fly') + nFly('gold') < 5 + g.level) g.ents.push(mkEnt(Math.random() < 0.09 ? 'gold' : 'fly'));
+    if (g.t > 6 && nFly('wasp') < Math.min(5, 1 + Math.floor(g.level * 0.8)) && Math.random() < 0.5) { const w = mkEnt('wasp'); w.y = pTop; g.ents.push(w); }
+  }
+  /* wasp reaches frog */
+  for (const e of g.ents) if (e.k === 'wasp' && !e.caught && e.y > fy - FR * 1.9 && Math.abs(e.x - fx) < FR * 1.4) { sfx.sting(); puff(e.x, e.y, 14, ['#ffd24a', '#222']); e.y = pTop; e.x = Math.random() * W; e.a = Math.PI / 2; e.stun = 1; hurt('STUNG!'); if (state !== STATES.PLAYING) return; }
+  /* tongue */
+  const t = g.tg; t.cd = Math.max(0, t.cd - dt);
+  if (t.st === 1) {
+    const m = mouth(), px = m.x + t.dx * t.len, py = m.y + t.dy * t.len; t.len = Math.min(t.tl, t.len + 1500 * dt);
+    const nx = m.x + t.dx * t.len, ny = m.y + t.dy * t.len;
+    for (const e of g.ents) {
+      if (e.caught) continue; const hr = Math.max(18, baseR * sc(e.y) * 1.7);
+      if (segDist(e.x, e.y, px, py, nx, ny) < hr) {
+        if (e.k === 'wasp') {
+          sfx.bop(); t.stun = 1; t.st = 2; e.stun = 2; e.x = Math.random() * W; e.y = pTop; e.a = Math.PI / 2; puff(nx, ny, 10, ['#ffd24a', '#fff']); pop('BOP!', '#ffe28a', nx, ny);
+          for (const c of t.caught) c.caught = false; t.caught = []; break;
+        }
+        e.caught = true; t.caught.push(e);
+      }
+    }
+    if (t.st === 1 && t.len >= t.tl) t.st = 2;
+  } else if (t.st === 2) {
+    t.len -= (t.stun ? 1000 : 2200) * dt;
+    if (t.len <= 0) { const stunned = t.stun; eatCaught(); if (stunned) t.cd = 0.4; }
+  }
+  if (t.st !== 0) { const m = mouth(); for (const e of t.caught) { e.x = m.x + t.dx * t.len; e.y = m.y + t.dy * t.len; } }
+  g.open = t.st ? 1 : Math.max(0, g.open - dt * 4);
+}
+
+/* ---------- input ---------- */
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault(); audio(); G.aimX = e.clientX; G.aimY = e.clientY;
+  if (state === STATES.START) startGame();
+  else if (state === STATES.GAMEOVER) { if (performance.now() - overAt > 700) startGame(); }
+  else shoot(e.clientX, e.clientY);
+});
+cv.addEventListener('pointermove', e => { G.aimX = e.clientX; G.aimY = e.clientY; });
+addEventListener('keydown', e => { if ((e.code === 'Space' || e.code === 'Enter') && !e.repeat) { e.preventDefault(); audio(); if (state === STATES.START) startGame(); else if (state === STATES.GAMEOVER && performance.now() - overAt > 700) startGame(); else shoot(G.aimX, G.aimY); } });
+
+/* ---------- drawing ---------- */
+function txt(s, x, y, size, col, weight, alpha) {
+  ctx.globalAlpha = alpha == null ? 1 : alpha; ctx.fillStyle = col;
+  ctx.font = (weight || 'bold') + ' ' + size + 'px system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(s, x, y); ctx.globalAlpha = 1;
+}
+const ell = (x, y, rx, ry, col) => { ctx.fillStyle = col; ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, TAU); ctx.fill(); };
+function bug(e, now) {
+  const s = sc(e.y), r = baseR * s * (e.k === 'wasp' ? 1.3 : 1), hov = r * 2.2 + Math.sin(e.ph) * r * 0.4, y = e.y - hov;
+  ell(e.x, e.y, r * 1.1, r * 0.35, 'rgba(0,0,0,0.25)');
+  const flap = Math.abs(Math.sin(e.ph * 3));
+  if (e.k === 'gold') { const gl = ctx.createRadialGradient(e.x, y, 0, e.x, y, r * 3.5); gl.addColorStop(0, 'rgba(255,230,100,0.8)'); gl.addColorStop(1, 'rgba(255,230,100,0)'); ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(e.x, y, r * 3.5, 0, TAU); ctx.fill(); }
+  ctx.fillStyle = 'rgba(255,255,255,0.7)'; ell(e.x - r * 0.6, y - r * 0.5, r * 0.9, r * (0.25 + 0.5 * flap), 'rgba(255,255,255,0.7)'); ell(e.x + r * 0.6, y - r * 0.5, r * 0.9, r * (0.25 + 0.5 * flap), 'rgba(255,255,255,0.7)');
+  if (e.k === 'wasp') { ell(e.x, y, r * 1.1, r * 0.8, '#ffd21e'); ctx.fillStyle = '#222'; ctx.fillRect(e.x - r * 0.5, y - r * 0.75, r * 0.3, r * 1.5); ctx.fillRect(e.x + r * 0.1, y - r * 0.7, r * 0.3, r * 1.4); ell(e.x + r * 1.1, y, r * 0.5, r * 0.45, '#222'); ctx.fillStyle = '#c00'; ctx.beginPath(); ctx.moveTo(e.x - r * 1.1, y); ctx.lineTo(e.x - r * 1.7, y + r * 0.2); ctx.lineTo(e.x - r * 1.1, y + r * 0.3); ctx.fill(); }
+  else { ell(e.x, y, r * 0.9, r * 0.6, e.k === 'gold' ? '#ffd24a' : '#2b2b33'); ell(e.x + r * 0.8, y, r * 0.4, r * 0.38, e.k === 'gold' ? '#fff3a0' : '#111'); }
+}
+function frog(g, now) {
+  const m = mouth(), bob = Math.sin(now * 0.004) * 2, R = FR;
+  ell(fx, fy + R * 0.55, R * 2, R * 0.75, 'rgba(0,0,0,0.25)');
+  ell(fx, fy + R * 0.5, R * 1.9, R * 0.7, '#2e8b3d'); ctx.fillStyle = '#4fae52'; ctx.beginPath(); ctx.ellipse(fx, fy + R * 0.45, R * 1.75, R * 0.6, 0, 0, TAU); ctx.fill();
+  ell(fx - R * 0.95, fy + R * 0.2, R * 0.55, R * 0.4, '#3d9a45'); ell(fx + R * 0.95, fy + R * 0.2, R * 0.55, R * 0.4, '#3d9a45');
+  const bg = ctx.createRadialGradient(fx - R * 0.3, fy - R * 0.4 + bob, R * 0.1, fx, fy + bob, R * 1.1); bg.addColorStop(0, '#9be36a'); bg.addColorStop(0.6, '#4aa83f'); bg.addColorStop(1, '#25682c');
+  ctx.fillStyle = bg; ctx.beginPath(); ctx.ellipse(fx, fy + bob, R * 1.15, R * 0.95, 0, 0, TAU); ctx.fill();
+  ell(fx, fy + R * 0.25 + bob, R * 0.75, R * 0.55, '#d8f0a8');
+  const mo = g.open; ctx.strokeStyle = '#1b4a1f'; ctx.lineWidth = 3; ctx.beginPath(); ctx.ellipse(m.x, m.y + bob, R * 0.6, R * (0.05 + 0.2 * mo), 0, 0, Math.PI); ctx.stroke(); if (mo > 0.2) ell(m.x, m.y + bob, R * 0.55, R * 0.16 * mo, '#7a1f2b');
+  const ax = clamp((g.aimX - fx) / W, -1, 1), ay = clamp((g.aimY - fy) / H, -1, 0);
+  for (const s of [-1, 1]) { const ex = fx + s * R * 0.62, ey = fy - R * 0.85 + bob; ell(ex, ey, R * 0.38, R * 0.38, '#7fd052'); ell(ex, ey, R * 0.27, R * 0.27, '#fff'); ell(ex + ax * R * 0.1, ey + ay * R * 0.1 + R * 0.02, R * 0.13, R * 0.13, '#111'); }
+  if (g.hurt > 0) { ctx.fillStyle = 'rgba(255,60,40,' + g.hurt * 0.5 + ')'; ctx.beginPath(); ctx.ellipse(fx, fy + bob, R * 1.2, R, 0, 0, TAU); ctx.fill(); }
+}
+function tongue(g) {
+  const t = g.tg; if (t.st === 0) return; const m = mouth(), tx = m.x + t.dx * t.len, ty = m.y + t.dy * t.len, nx = -t.dy, ny = t.dx, w = Math.sin(t.len * 0.03) * 6;
+  ctx.strokeStyle = '#e8587a'; ctx.lineCap = 'round'; ctx.lineWidth = FR * 0.2; ctx.beginPath(); ctx.moveTo(m.x, m.y); ctx.quadraticCurveTo((m.x + tx) / 2 + nx * w, (m.y + ty) / 2 + ny * w, tx, ty); ctx.stroke();
+  ctx.strokeStyle = '#ff9bb3'; ctx.lineWidth = FR * 0.07; ctx.beginPath(); ctx.moveTo(m.x, m.y); ctx.lineTo(tx, ty); ctx.stroke(); ell(tx, ty, FR * 0.2, FR * 0.2, '#ff6f93');
+}
+function draw(now) {
+  const g = G, pulse = Math.sin(now * 0.008);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const sky = ctx.createLinearGradient(0, 0, 0, yH); sky.addColorStop(0, '#ffb86b'); sky.addColorStop(1, '#ffe6a8'); ctx.fillStyle = sky; ctx.fillRect(0, 0, W, yH + 2);
+  ctx.fillStyle = '#ffe9a0'; ctx.beginPath(); ctx.arc(W * 0.75, yH - 20, 36, 0, TAU); ctx.fill();
+  ctx.fillStyle = '#2f5d3b'; for (const t of decor.trees) { ctx.beginPath(); ctx.moveTo(t.x - t.w / 2, yH + 2); ctx.lineTo(t.x, yH - t.h); ctx.lineTo(t.x + t.w / 2, yH + 2); ctx.fill(); }
+  const wt = ctx.createLinearGradient(0, yH, 0, H); wt.addColorStop(0, '#9fd9c8'); wt.addColorStop(0.35, '#3fa0a0'); wt.addColorStop(1, '#14586a'); ctx.fillStyle = wt; ctx.fillRect(0, yH, W, H - yH);
+  ctx.save();
+  if (g.shake > 0) ctx.translate((Math.random() - .5) * 12 * g.shake, (Math.random() - .5) * 12 * g.shake);
+  for (const r of g.ripples) { const s = sc(r.y), rr = (10 + r.age * 70) * s; ctx.strokeStyle = 'rgba(255,255,255,' + clamp(0.5 - r.age * 0.4, 0, 0.5) + ')'; ctx.lineWidth = 2; ctx.beginPath(); ctx.ellipse(r.x, r.y, rr, rr * 0.3, 0, 0, TAU); ctx.stroke(); }
+  for (const p of decor.pads) { const s = sc(p.y), r = FR * 1.1 * s * p.r; ell(p.x, p.y + 3, r, r * 0.34, 'rgba(0,0,0,0.2)'); ell(p.x, p.y, r, r * 0.34, '#3f9a4a'); ell(p.x, p.y - 1, r * 0.8, r * 0.26, '#52b45a'); ctx.fillStyle = '#3fa0a0'; ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x + r, p.y - r * 0.12); ctx.lineTo(p.x + r, p.y + r * 0.12); ctx.fill(); if (p.f) { ell(p.x - r * 0.3, p.y - r * 0.2, r * 0.18, r * 0.12, '#ff9ac8'); } }
+  for (const r of decor.reeds) { const s = sc(r.y), h = FR * 2.6 * s * r.h; ctx.strokeStyle = '#3a7a3a'; ctx.lineWidth = Math.max(2, 4 * s); ctx.beginPath(); ctx.moveTo(r.x, r.y); ctx.lineTo(r.x + Math.sin(now * 0.001 + r.x) * 4, r.y - h); ctx.stroke(); ctx.fillStyle = '#7a4a22'; ctx.fillRect(r.x - 3 * s, r.y - h - 10 * s, 6 * s, 14 * s); }
+  const list = g.ents.filter(e => !e.caught).sort((a, b) => a.y - b.y); for (const e of list) bug(e, now);
+  if (state === STATES.PLAYING) { const ry = clamp(g.aimY, pTop, fy - FR * 1.5), s = sc(ry); ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineWidth = 2; ctx.setLineDash([4, 5]); ctx.beginPath(); ctx.ellipse(g.aimX, ry, 18 * s + 6, (18 * s + 6) * 0.45, 0, 0, TAU); ctx.stroke(); ctx.setLineDash([]); }
+  tongue(g); for (const e of g.tg.caught) bug(e, now); frog(g, now);
+  for (const p of g.parts) { ctx.globalAlpha = clamp(p.life * 2, 0, 1); ctx.fillStyle = p.col; ctx.fillRect(p.x, p.y, p.sz, p.sz); }
+  ctx.globalAlpha = 1; ctx.restore();
+  for (const p of g.popups) txt(p.t, p.x, p.y, 22, p.col, 'bold', clamp(p.life * 1.5, 0, 1));
+
+  const ty = safeTop + 30, ink = '#fffbe8';
+  if (state === STATES.PLAYING) {
+    txt(String(Math.floor(g.score)), W / 2, ty, 34, ink);
+    const bw = Math.min(210, W * 0.5), hc = g.hunger < 0.25 ? '#ff5a4a' : g.hunger < 0.5 ? '#ffd24a' : '#7ae36a'; ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fillRect(W / 2 - bw / 2, ty + 24, bw, 9); ctx.fillStyle = hc; ctx.fillRect(W / 2 - bw / 2, ty + 24, bw * g.hunger, 9);
+    txt('HUNGER', W / 2, ty + 46, 11, ink, 'bold', 0.8); txt('LEVEL ' + (g.level + 1) + '   BUGS ' + g.eaten, W / 2, ty + 64, 13, ink, 'bold', 0.9);
+    txt('\u2665'.repeat(Math.max(0, g.lives)), W - 44, safeTop + 22, 22, '#ff6a5a'); txt('BEST ' + best, 44, safeTop + 22, 12, ink, 'bold', 0.7);
+    if (!g.tapped) { txt('Tap where you want to flick the tongue!', W / 2, H * 0.5, Math.min(18, W / 21), '#fff', 'bold', 0.8 + 0.2 * pulse); txt('Catch many bugs in one flick. Bop wasps before they sting!', W / 2, H * 0.5 + 26, Math.min(15, W / 25), '#fff', 'bold', 0.85); }
+  } else if (state === STATES.START) {
+    ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(0, 0, W, safeTop + 205);
+    txt('FROGGY FEAST', W / 2, safeTop + 62, Math.min(52, W / 7.5), ink);
+    txt('Tap to flick your tongue and catch flies in the pond', W / 2, safeTop + 102, Math.min(15, W / 25), ink, 'normal', 0.9);
+    txt('Chain several in one flick. Wasps ahead - bop them away!', W / 2, safeTop + 126, Math.min(15, W / 25), ink, 'normal', 0.8);
+    txt('TAP / CLICK TO START', W / 2, safeTop + 168, 22, '#fff', 'bold', 0.65 + 0.35 * pulse);
+    if (best) txt('BEST ' + best, W / 2, safeTop + 198, 15, '#ffd24a', 'bold');
+  } else {
+    ctx.fillStyle = 'rgba(5,25,30,0.62)'; ctx.fillRect(0, 0, W, H);
+    txt(reason, W / 2, H * 0.3, Math.min(42, W / 9.5), '#ffb09a'); txt('SCORE ' + Math.floor(g.score), W / 2, H * 0.3 + 50, 30, ink);
+    txt('BUGS ' + g.eaten + '   BEST ' + best, W / 2, H * 0.3 + 86, 17, '#ffd98a', 'normal');
+    if (performance.now() - overAt > 700) txt('TAP / CLICK TO RETRY', W / 2, H * 0.3 + 134, 22, ink, 'bold', 0.6 + 0.4 * pulse);
+  }
+}
+
+resize(); initDecor(); resetGame(); startLoop();
+})();
+</script>
+</body>
+</html>

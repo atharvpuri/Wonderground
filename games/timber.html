@@ -1,0 +1,1005 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Timber Rapids</title>
+<style>
+:root{--bg:#0b191e}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0b191e}}
+:root[data-theme="dark"]{--bg:#0b191e}
+html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;overscroll-behavior:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+canvas{position:fixed;inset:0;display:block;touch-action:none}
+#probe{position:fixed;top:0;left:0;visibility:hidden;padding-top:env(safe-area-inset-top,0px)}
+</style>
+</head>
+<body>
+<div id="probe"></div>
+<canvas id="c"></canvas>
+<script>
+(() => {
+'use strict';
+const STATES = { START: 0, PLAYING: 1, GAMEOVER: 2 };
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), probe = document.getElementById('probe');
+const TAU = Math.PI * 2, RIVER_W = 540, CAM_H = 160, CAM_DIST = 190, FOV = 280;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const rr = (a, b) => a + Math.random() * (b - a);
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+};
+const loadTop = () => { try { const a = JSON.parse(store.get('timberrapids.top5') || '[]'); return Array.isArray(a) ? a.filter(n => typeof n === 'number').slice(0, 5) : []; } catch (e) { return []; } };
+let top5 = loadTop();
+function saveTop(s) { const a = top5.slice(); a.push(s); a.sort((x, y) => y - x); top5 = a.slice(0, 5); store.set('timberrapids.top5', JSON.stringify(top5)); return top5.indexOf(s); }
+
+/* ---------- canvas & viewport ---------- */
+let W, H, dpr, safeTop = 0, scale = 1;
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 3);
+  W = innerWidth; H = innerHeight;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  safeTop = probe.offsetHeight || 0;
+  scale = Math.min(W / 460, H / 700);
+}
+addEventListener('resize', resize);
+addEventListener('orientationchange', () => setTimeout(resize, 120));
+
+/* ---------- audio synthesis ---------- */
+let AC = null, waterSound = null;
+function audio() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { AC = null; } }
+  if (AC && AC.state === 'suspended') AC.resume();
+  return AC;
+}
+function tone(type, f0, f1, dur, vol, delay) {
+  const a = audio(); if (!a) return;
+  try {
+    const o = a.createOscillator(), g = a.createGain(), t = a.currentTime + (delay || 0);
+    o.type = type; o.frequency.setValueAtTime(f0, t);
+    o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(a.destination);
+    o.start(t); o.stop(t + dur + 0.03);
+  } catch (e) {}
+}
+function startWaterAmbience() {
+  const a = audio(); if (!a || waterSound) return;
+  try {
+    const bufSize = a.sampleRate * 2;
+    const buf = a.createBuffer(1, bufSize, a.sampleRate);
+    const data = buf.getChannelData(0);
+    let last = 0;
+    for (let i = 0; i < bufSize; i++) {
+      const white = Math.random() * 2 - 1;
+      data[i] = (last + 0.02 * white) / 1.02;
+      last = data[i];
+      data[i] *= 3.5;
+    }
+    const src = a.createBufferSource();
+    src.buffer = buf;
+    src.loop = true;
+    const filter = a.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 420;
+    const gain = a.createGain();
+    gain.gain.value = 0.04;
+    src.connect(filter); filter.connect(gain); gain.connect(a.destination);
+    src.start();
+    waterSound = { src, filter, gain };
+  } catch (e) {}
+}
+function setWaterSpeed(spdRatio) {
+  if (!waterSound || !AC) return;
+  const now = AC.currentTime;
+  const clamped = clamp(spdRatio, 0, 1);
+  waterSound.filter.frequency.setTargetAtTime(350 + clamped * 1200, now, 0.1);
+  waterSound.gain.gain.setTargetAtTime(0.035 + clamped * 0.08, now, 0.1);
+}
+function stopWaterAmbience() {
+  if (waterSound) {
+    try { waterSound.src.stop(); } catch (e) {}
+    waterSound = null;
+  }
+}
+
+const sfx = {
+  jump() { tone('triangle', 180, 420, 0.18, 0.15); tone('sine', 280, 560, 0.22, 0.1, 0.03); },
+  splash() { tone('sawtooth', 240, 60, 0.25, 0.14); tone('sine', 160, 40, 0.3, 0.18); },
+  leaf(c) { const b = 640 * Math.pow(1.09, Math.min(c, 8)); tone('triangle', b, b * 1.5, 0.12, 0.12); },
+  rockHit() { tone('sawtooth', 120, 30, 0.45, 0.24); tone('square', 75, 20, 0.45, 0.16); },
+  graze() { tone('sine', 520, 780, 0.15, 0.11); },
+  rushActive() { [440, 554, 659, 880].forEach((n, i) => tone('triangle', n, n * 1.2, 0.25, 0.12, i * 0.08)); },
+  shatter() { tone('sawtooth', 360, 80, 0.3, 0.18); }
+};
+
+/* ---------- 3D perspective camera ---------- */
+const Cam = {
+  x: 0, y: CAM_H, z: 0,
+  project(wx, wy, wz) {
+    const rz = wz - this.z;
+    if (rz <= 10) return null; // Near clipping
+    const sc = FOV / rz;
+    const sx = W / 2 + (wx - this.x) * sc * scale;
+    const sy = H * 0.54 - (wy - this.y) * sc * scale;
+    return { x: sx, y: sy, scale: sc, depth: rz };
+  }
+};
+
+/* ---------- state ---------- */
+let state = STATES.START, G, raf = 0, last = 0, overAt = 0;
+const inp = { l: 0, r: 0, jump: 0, kl: 0, kr: 0, ptrId: null, startX: 0, startY: 0, curX: 0, moved: false };
+
+function resetGame() {
+  G = {
+    t: 0, score: 0, dist: 0, speed: 380, lives: 3, combo: 0, comboT: 0,
+    p: { x: 0, y: 0, vy: 0, logRoll: 0, jumpT: 0, tilt: 0, invuln: 0 },
+    rush: 0, rushTimer: 0,
+    rocks: [], leaves: [], logs: [], nextGenZ: 250,
+    parts: [], popups: [],
+    shake: 0, slowmo: 1, hint: 1, rank: -1
+  };
+  populateRiver(1600);
+}
+
+/* ---------- procedural river generation ---------- */
+function populateRiver(targetZ) {
+  while (G.nextGenZ < targetZ) {
+    const z = G.nextGenZ;
+    const dNorm = clamp(z / 3500, 0, 1);
+    const r = Math.random();
+
+    // 1. Granite Boulders
+    if (r < 0.45 + 0.18 * dNorm) {
+      const rockX = rr(-RIVER_W * 0.38, RIVER_W * 0.38);
+      const rad = rr(28, 42);
+      G.rocks.push({ x: rockX, z, r: rad, h: rad * 1.35, hit: false, grazed: false });
+    }
+    // 2. Horizontal Log Barriers (Must Jump!)
+    else if (r < 0.72) {
+      const isLeft = Math.random() < 0.5;
+      const lx = isLeft ? -RIVER_W * 0.22 : RIVER_W * 0.22;
+      G.logs.push({ x: lx, z, w: RIVER_W * 0.52, h: 26, jumped: false });
+    }
+
+    // 3. Golden Maple Leaves (Pickups)
+    if (Math.random() < 0.6) {
+      const leafX = rr(-RIVER_W * 0.35, RIVER_W * 0.35);
+      for (let k = 0; k < 3; k++) {
+        G.leaves.push({ x: leafX + Math.sin(k * 0.8) * 25, z: z + k * 35, got: false, rot: Math.random() * TAU });
+      }
+    }
+
+    G.nextGenZ += rr(140, 240) - dNorm * 45;
+  }
+}
+resetGame();
+
+/* ---------- loop ---------- */
+function stopLoop() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+function startLoop() { stopLoop(); last = performance.now(); raf = requestAnimationFrame(frame); }
+function frame(now) {
+  raf = requestAnimationFrame(frame);
+  const dt = Math.min(0.04, Math.max(0.001, (now - last) / 1000));
+  last = now;
+  update(dt * G.slowmo);
+  draw(now);
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { stopLoop(); stopWaterAmbience(); }
+  else { startLoop(); if (state === STATES.PLAYING) startWaterAmbience(); }
+});
+function startGame() { stopLoop(); resetGame(); state = STATES.PLAYING; startWaterAmbience(); startLoop(); }
+
+/* ---------- visual juice & particles ---------- */
+const pop = (t, col, x, y, scale = 1) => G.popups.push({ t, col, x, y, life: 1.1, scale });
+function splash(x, z, n, cols, sp = 140) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * TAU, s = sp * (0.3 + Math.random());
+    if (G.parts.length < 240) G.parts.push({
+      x, y: 0, z,
+      vx: Math.cos(a) * s, vy: rr(120, 280), vz: Math.sin(a) * s,
+      life: 0.4 + Math.random() * 0.45, max: 0.85, col: cols[i % cols.length], sz: 2.5 + Math.random() * 3
+    });
+  }
+}
+
+/* ---------- update logic ---------- */
+function update(dt) {
+  const g = G, p = g.p;
+  g.t += dt;
+  g.shake = Math.max(0, g.shake - dt * 3);
+  g.comboT = Math.max(0, g.comboT - dt);
+  if (g.comboT <= 0) g.combo = 0;
+
+  if (g.rushTimer > 0) {
+    g.rushTimer -= dt;
+    if (g.rushTimer <= 0) g.rush = 0;
+  }
+
+  // Update particles & popups
+  for (let i = g.parts.length - 1; i >= 0; i--) {
+    const q = g.parts[i]; q.life -= dt;
+    q.x += q.vx * dt; q.y += q.vy * dt; q.z += q.vz * dt;
+    q.vy -= 700 * dt;
+    if (q.life <= 0) g.parts.splice(i, 1);
+  }
+  for (let i = g.popups.length - 1; i >= 0; i--) {
+    const q = g.popups[i]; q.life -= dt; q.y += dt * 38;
+    if (q.life <= 0) g.popups.splice(i, 1);
+  }
+
+  if (state === STATES.START) {
+    g.dist += 140 * dt;
+    p.logRoll += dt * 6;
+    populateRiver(g.dist + 1600);
+    Cam.z = g.dist - CAM_DIST;
+    return;
+  }
+  if (state === STATES.GAMEOVER) {
+    p.vy -= 900 * dt;
+    p.y = Math.max(0, p.y + p.vy * dt);
+    Cam.z = g.dist - CAM_DIST;
+    return;
+  }
+
+  // Non-linear speed ramp
+  const targetSpeed = 380 + (840 - 380) * (1 - Math.exp(-g.dist / 2800));
+  g.speed = g.rush ? targetSpeed * 1.4 : targetSpeed;
+  g.dist += g.speed * dt;
+  g.score += Math.floor(g.speed * dt * 0.25 * (g.rush ? 3 : 1));
+  setWaterSpeed(g.speed / 840);
+
+  // Lateral steering input
+  const steerIn = inp.l ? -1 : inp.r ? 1 : (inp.kr ? 1 : 0) - (inp.kl ? 1 : 0);
+  p.x += steerIn * 360 * dt;
+  const bound = RIVER_W * 0.44;
+  p.x = clamp(p.x, -bound, bound);
+  p.tilt = lerp(p.tilt, steerIn * 0.35, dt * 8);
+
+  // Log rotation
+  p.logRoll += dt * (g.speed * 0.025 + Math.abs(steerIn) * 8);
+
+  // Jump physics
+  if (p.y > 0 || p.vy > 0) {
+    p.vy -= 1400 * dt;
+    p.y += p.vy * dt;
+    if (p.y <= 0) {
+      p.y = 0;
+      p.vy = 0;
+      sfx.splash();
+      splash(p.x, g.dist, 14, ['#ffffff', '#a8e6cf', '#e8f5e9'], 160);
+    }
+  } else if (inp.jump && p.y === 0) {
+    inp.jump = 0;
+    p.vy = 520;
+    sfx.jump();
+    splash(p.x, g.dist, 8, ['#ffffff', '#a8e6cf'], 120);
+    if (g.hint) g.hint = 0;
+  }
+
+  if (p.invuln > 0) p.invuln -= dt;
+
+  // Camera tracking
+  Cam.z = g.dist - CAM_DIST;
+  Cam.x = lerp(Cam.x, p.x * 0.35, dt * 6);
+  Cam.y = CAM_H + (p.y * 0.4);
+
+  // Populate river chunks
+  populateRiver(g.dist + 1600);
+
+  // Clean passed objects
+  g.rocks = g.rocks.filter(o => o.z > g.dist - 100);
+  g.logs = g.logs.filter(o => o.z > g.dist - 100);
+  g.leaves = g.leaves.filter(o => o.z > g.dist - 80 && !o.got);
+
+  // Water spray behind log
+  if (Math.random() < 0.45) {
+    splash(p.x + rr(-20, 20), g.dist - 18, 2, ['#ffffff', '#c8e6c9'], 80);
+  }
+
+  // --- COLLISIONS & GRAZES ---
+  // 1. Granite Boulders
+  for (const r of g.rocks) {
+    const dz = r.z - g.dist;
+    const dx = Math.abs(r.x - p.x);
+    const dist2D = Math.hypot(r.x - p.x, dz);
+
+    // Collision
+    if (!r.hit && dz > -15 && dz < 25 && dx < r.r + 14 && p.y < r.h * 0.75) {
+      r.hit = true;
+      if (g.rush) {
+        // Smash through boulder during River Rush!
+        sfx.shatter();
+        g.shake = 0.6;
+        g.score += 500;
+        pop('ROCK SHATTERED! +500', '#ffd24a', r.x, 35, 1.25);
+        splash(r.x, r.z, 24, ['#78909c', '#b0bec5', '#ffffff'], 240);
+      } else if (p.invuln <= 0) {
+        p.invuln = 1.6;
+        g.lives--;
+        g.combo = 0;
+        g.shake = 1.1;
+        sfx.rockHit();
+        splash(p.x, g.dist, 20, ['#ff5252', '#ffffff'], 200);
+        pop('ROCK CRUNCH! -1 AXE', '#ff5252', p.x, 30, 1.2);
+        if (g.lives <= 0) {
+          state = STATES.GAMEOVER;
+          overAt = performance.now();
+          g.rank = saveTop(Math.floor(g.score + g.dist * 0.5));
+          stopWaterAmbience();
+          return;
+        }
+      }
+    }
+    // Graze / Near-Miss
+    else if (!r.grazed && !r.hit && dz > -10 && dz < 10 && dx < r.r + 38 && dx >= r.r + 14) {
+      r.grazed = true;
+      g.combo++;
+      g.comboT = 3.5;
+      sfx.graze();
+      const pts = 150 * Math.min(5, g.combo);
+      g.score += pts;
+      pop('CLOSE SHAVE! +' + pts, '#38d9a9', p.x, 28, 1.05);
+      g.rush = Math.min(100, g.rush + 18);
+      if (g.rush >= 100 && g.rushTimer <= 0) {
+        g.rush = 100;
+        g.rushTimer = 6.0;
+        sfx.rushActive();
+        pop('RIVER RUSH ACTIVE!', '#ffd24a', p.x, 48, 1.35);
+      }
+    }
+  }
+
+  // 2. Horizontal Log Barriers
+  for (const l of g.logs) {
+    const dz = l.z - g.dist;
+    const dx = Math.abs(l.x - p.x);
+    if (!l.jumped && dz > -15 && dz < 22 && dx < l.w * 0.5 + 12) {
+      if (p.y > l.h + 8) {
+        // Successfully jumped over!
+        l.jumped = true;
+        g.combo++;
+        g.comboT = 3.5;
+        const pts = 250 * Math.min(4, g.combo);
+        g.score += pts;
+        pop('CLEAN LEAP! +' + pts, '#4ae6ff', p.x, 32, 1.15);
+      } else if (p.invuln <= 0) {
+        l.jumped = true;
+        if (g.rush) {
+          sfx.shatter();
+          g.score += 400;
+          pop('LOG SMASHED! +400', '#ffd24a', p.x, 35, 1.2);
+        } else {
+          p.invuln = 1.6;
+          g.lives--;
+          g.combo = 0;
+          g.shake = 1.0;
+          sfx.rockHit();
+          pop('LOG SNAG! -1 AXE', '#ff5252', p.x, 30, 1.2);
+          if (g.lives <= 0) {
+            state = STATES.GAMEOVER;
+            overAt = performance.now();
+            g.rank = saveTop(Math.floor(g.score + g.dist * 0.5));
+            stopWaterAmbience();
+            return;
+          }
+        }
+      }
+    }
+  }
+
+  // 3. Maple Leaves (Pickups)
+  for (const lf of g.leaves) {
+    const dz = Math.abs(lf.z - g.dist);
+    const dx = Math.abs(lf.x - p.x);
+    if (!lf.got && dz < 24 && dx < 32) {
+      lf.got = true;
+      g.combo++;
+      g.comboT = 3.5;
+      sfx.leaf(g.combo);
+      const pts = 100 * Math.min(5, g.combo) * (g.rush ? 3 : 1);
+      g.score += pts;
+      pop('+' + pts, '#ffd24a', lf.x, 22, 1.0);
+      splash(lf.x, lf.z, 6, ['#ffd24a', '#ff9800'], 100);
+      g.rush = Math.min(100, g.rush + 14);
+      if (g.rush >= 100 && g.rushTimer <= 0) {
+        g.rush = 100;
+        g.rushTimer = 6.0;
+        sfx.rushActive();
+        pop('RIVER RUSH ACTIVE!', '#ffd24a', p.x, 48, 1.35);
+      }
+    }
+  }
+}
+
+/* ---------- input handlers ---------- */
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault(); audio();
+  try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+  if (state === STATES.START) { startGame(); return; }
+  if (state === STATES.GAMEOVER) { if (performance.now() - overAt > 850) startGame(); return; }
+
+  inp.ptrId = e.pointerId;
+  inp.startX = e.clientX;
+  inp.startY = e.clientY;
+  inp.curX = e.clientX;
+  inp.moved = false;
+});
+
+cv.addEventListener('pointermove', e => {
+  if (inp.ptrId !== e.pointerId) return;
+  const dx = e.clientX - inp.curX;
+  inp.curX = e.clientX;
+  if (Math.abs(e.clientX - inp.startX) > 8) inp.moved = true;
+
+  if (dx < -3) { inp.l = 1; inp.r = 0; }
+  else if (dx > 3) { inp.r = 1; inp.l = 0; }
+});
+
+const releasePtr = e => {
+  if (inp.ptrId !== e.pointerId) return;
+  if (!inp.moved && state === STATES.PLAYING) {
+    // Quick tap triggers jump
+    inp.jump = 1;
+  }
+  inp.ptrId = null;
+  inp.l = 0;
+  inp.r = 0;
+};
+cv.addEventListener('pointerup', releasePtr);
+cv.addEventListener('pointercancel', releasePtr);
+
+addEventListener('blur', () => {
+  inp.l = inp.r = inp.jump = inp.kl = inp.kr = 0;
+  inp.ptrId = null;
+});
+
+addEventListener('keydown', e => {
+  const c = e.code;
+  if (c === 'ArrowLeft' || c === 'KeyA') inp.kl = 1;
+  else if (c === 'ArrowRight' || c === 'KeyD') inp.kr = 1;
+  else if (c === 'ArrowUp' || c === 'KeyW' || c === 'Space') {
+    if (!e.repeat) {
+      audio();
+      if (state === STATES.START) startGame();
+      else if (state === STATES.GAMEOVER && performance.now() - overAt > 850) startGame();
+      else inp.jump = 1;
+    }
+  } else return;
+  e.preventDefault();
+});
+
+addEventListener('keyup', e => {
+  const c = e.code;
+  if (c === 'ArrowLeft' || c === 'KeyA') inp.kl = 0;
+  else if (c === 'ArrowRight' || c === 'KeyD') inp.kr = 0;
+});
+
+/* ---------- 3D rendering ---------- */
+function txt(s, x, y, size, col, weight = 'bold', alpha = 1, align = 'center') {
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = col;
+  ctx.font = weight + ' ' + size + 'px system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
+  ctx.textAlign = align;
+  ctx.textBaseline = 'middle';
+  ctx.fillText(s, x, y);
+  ctx.globalAlpha = 1;
+}
+
+function drawRiverCanyon() {
+  const segStep = 45;
+  const startZ = Math.floor(Cam.z / segStep) * segStep;
+  const endZ = startZ + 1300;
+
+  // Sky Backdrop
+  const skyGrad = ctx.createLinearGradient(0, 0, 0, H * 0.55);
+  skyGrad.addColorStop(0, '#0a161d');
+  skyGrad.addColorStop(0.65, '#132832');
+  skyGrad.addColorStop(1, '#2c4a4a');
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Distant mountain ridges
+  ctx.fillStyle = '#0f2026';
+  ctx.beginPath();
+  ctx.moveTo(0, H * 0.54);
+  for (let x = 0; x <= W; x += 32) {
+    const mh = Math.sin(x * 0.008) * 35 + Math.cos(x * 0.02) * 18;
+    ctx.lineTo(x, H * 0.44 - mh);
+  }
+  ctx.lineTo(W, H * 0.54);
+  ctx.fill();
+
+  // Draw River Segments from Far to Near (Painter's Algorithm)
+  for (let z = endZ; z >= startZ; z -= segStep) {
+    const zNext = z + segStep;
+    const hw = RIVER_W * 0.5;
+
+    const pL1 = Cam.project(-hw, 0, z);
+    const pR1 = Cam.project(hw, 0, z);
+    const pL2 = Cam.project(-hw, 0, zNext);
+    const pR2 = Cam.project(hw, 0, zNext);
+
+    if (!pL1 || !pR1 || !pL2 || !pR2) continue;
+
+    // 1. Canyon Cliffs (Left & Right)
+    const cliffH = 90;
+    const cL1 = Cam.project(-hw - 180, cliffH, z);
+    const cR1 = Cam.project(hw + 180, cliffH, z);
+    const cL2 = Cam.project(-hw - 180, cliffH, zNext);
+    const cR2 = Cam.project(hw + 180, cliffH, zNext);
+
+    if (cL1 && cL2) {
+      ctx.fillStyle = (Math.floor(z / segStep) % 2 === 0) ? '#1f302b' : '#182622';
+      ctx.beginPath();
+      ctx.moveTo(cL1.x, cL1.y); ctx.lineTo(pL1.x, pL1.y);
+      ctx.lineTo(pL2.x, pL2.y); ctx.lineTo(cL2.x, cL2.y);
+      ctx.closePath();
+      ctx.fill();
+    }
+    if (cR1 && cR2) {
+      ctx.fillStyle = (Math.floor(z / segStep) % 2 === 0) ? '#1b2a26' : '#14201d';
+      ctx.beginPath();
+      ctx.moveTo(pR1.x, pR1.y); ctx.lineTo(cR1.x, cR1.y);
+      ctx.lineTo(cR2.x, cR2.y); ctx.lineTo(pR2.x, pR2.y);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // 2. River Water Surface
+    const isAlt = (Math.floor(z / segStep) % 2 === 0);
+    const waterCol = isAlt ? '#0f4c5c' : '#0d414f';
+    ctx.fillStyle = waterCol;
+    ctx.beginPath();
+    ctx.moveTo(pL1.x, pL1.y);
+    ctx.lineTo(pR1.x, pR1.y);
+    ctx.lineTo(pR2.x, pR2.y);
+    ctx.lineTo(pL2.x, pL2.y);
+    ctx.closePath();
+    ctx.fill();
+
+    // 3. Foaming White-Water Crests
+    const foamPhase = Math.sin(z * 0.08 - G.t * 8);
+    if (foamPhase > 0.4) {
+      ctx.strokeStyle = 'rgba(230, 255, 250, 0.45)';
+      ctx.lineWidth = Math.max(1, 2.5 * pL1.scale * scale);
+      ctx.beginPath();
+      ctx.moveTo(pL1.x + (pR1.x - pL1.x) * 0.25, pL1.y);
+      ctx.lineTo(pL1.x + (pR1.x - pL1.x) * 0.75, pL1.y);
+      ctx.stroke();
+    }
+
+    // 4. Shoreline Foam Borders
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+    ctx.lineWidth = Math.max(1, 3 * pL1.scale * scale);
+    ctx.beginPath();
+    ctx.moveTo(pL1.x, pL1.y); ctx.lineTo(pL2.x, pL2.y);
+    ctx.moveTo(pR1.x, pR1.y); ctx.lineTo(pR2.x, pR2.y);
+    ctx.stroke();
+  }
+}
+
+function drawWorldObjects() {
+  const queue = [];
+
+  // Boulders
+  for (const r of G.rocks) {
+    const proj = Cam.project(r.x, 0, r.z);
+    if (proj) queue.push({ type: 'rock', obj: r, proj, depth: proj.depth });
+  }
+
+  // Cross Logs
+  for (const l of G.logs) {
+    const proj = Cam.project(l.x, 0, l.z);
+    if (proj) queue.push({ type: 'crosslog', obj: l, proj, depth: proj.depth });
+  }
+
+  // Leaves
+  for (const lf of G.leaves) {
+    if (lf.got) continue;
+    const proj = Cam.project(lf.x, 6, lf.z);
+    if (proj) queue.push({ type: 'leaf', obj: lf, proj, depth: proj.depth });
+  }
+
+  // Sort back to front
+  queue.sort((a, b) => b.depth - a.depth);
+
+  for (const item of queue) {
+    if (item.type === 'rock') drawRock(item.obj, item.proj);
+    else if (item.type === 'crosslog') drawCrossLog(item.obj, item.proj);
+    else if (item.type === 'leaf') drawLeaf(item.obj, item.proj);
+  }
+}
+
+function drawRock(r, proj) {
+  const rad = r.r * proj.scale * scale;
+  const h = r.h * proj.scale * scale;
+
+  ctx.save();
+  // Upstream Foam Breaking Wave
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+  ctx.beginPath();
+  ctx.ellipse(proj.x, proj.y + rad * 0.35, rad * 1.3, rad * 0.45, 0, 0, TAU);
+  ctx.fill();
+
+  // Granite Rock Body (Shaded Polygon)
+  const rockGrad = ctx.createLinearGradient(proj.x - rad, proj.y - h, proj.x + rad, proj.y);
+  rockGrad.addColorStop(0, '#546e7a');
+  rockGrad.addColorStop(0.5, '#37474f');
+  rockGrad.addColorStop(1, '#212121');
+
+  ctx.fillStyle = rockGrad;
+  ctx.beginPath();
+  ctx.moveTo(proj.x - rad, proj.y);
+  ctx.lineTo(proj.x - rad * 0.8, proj.y - h * 0.7);
+  ctx.lineTo(proj.x - rad * 0.2, proj.y - h);
+  ctx.lineTo(proj.x + rad * 0.6, proj.y - h * 0.85);
+  ctx.lineTo(proj.x + rad, proj.y);
+  ctx.closePath();
+  ctx.fill();
+
+  // Specular Ridge Lines
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+  ctx.lineWidth = Math.max(1, 1.8 * proj.scale * scale);
+  ctx.beginPath();
+  ctx.moveTo(proj.x - rad * 0.2, proj.y - h);
+  ctx.lineTo(proj.x + rad * 0.1, proj.y);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawCrossLog(l, proj) {
+  const w = l.w * proj.scale * scale;
+  const h = l.h * proj.scale * scale;
+
+  ctx.save();
+  // Water Wake
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+  ctx.beginPath();
+  ctx.ellipse(proj.x, proj.y + h * 0.3, w * 0.54, h * 0.4, 0, 0, TAU);
+  ctx.fill();
+
+  // Bark Log Cylinder
+  const logGrad = ctx.createLinearGradient(0, proj.y - h, 0, proj.y);
+  logGrad.addColorStop(0, '#8d6e63');
+  logGrad.addColorStop(0.6, '#5d4037');
+  logGrad.addColorStop(1, '#3e2723');
+
+  ctx.fillStyle = logGrad;
+  ctx.beginPath();
+  ctx.roundRect(proj.x - w * 0.5, proj.y - h, w, h, 6 * proj.scale * scale);
+  ctx.fill();
+
+  // Yellow Danger Warning Striping
+  ctx.strokeStyle = 'rgba(255, 214, 0, 0.45)';
+  ctx.lineWidth = Math.max(1, 3 * proj.scale * scale);
+  for (let s = -w * 0.45; s < w * 0.45; s += 24 * proj.scale * scale) {
+    ctx.beginPath();
+    ctx.moveTo(proj.x + s, proj.y - h);
+    ctx.lineTo(proj.x + s + 10 * proj.scale * scale, proj.y);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function drawLeaf(lf, proj) {
+  const sz = 16 * proj.scale * scale;
+  ctx.save();
+  ctx.translate(proj.x, proj.y);
+  ctx.rotate(lf.rot);
+
+  // Golden Maple Leaf
+  ctx.fillStyle = '#ffd54f';
+  ctx.beginPath();
+  ctx.arc(0, 0, sz * 0.8, 0, TAU);
+  ctx.fill();
+  ctx.fillStyle = '#ff8f00';
+  ctx.beginPath();
+  ctx.arc(0, 0, sz * 0.4, 0, TAU);
+  ctx.fill();
+
+  // Sparkling halo
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawLumberjack() {
+  const p = G.p;
+  const proj = Cam.project(p.x, p.y, G.dist);
+  if (!proj) return;
+
+  const sc = proj.scale * scale;
+  const logW = 75 * sc;
+  const logH = 22 * sc;
+
+  ctx.save();
+  ctx.translate(proj.x, proj.y);
+
+  // --- 1. RIDING LOG BENEATH FEET ---
+  const logY = 0;
+  // Foam splash around log
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+  ctx.beginPath();
+  ctx.ellipse(0, logY + 4 * sc, logW * 0.65, logH * 0.55, 0, 0, TAU);
+  ctx.fill();
+
+  // Wooden Log Cylinder
+  const logGrad = ctx.createLinearGradient(0, logY - logH * 0.6, 0, logY + logH * 0.6);
+  logGrad.addColorStop(0, '#a1887f');
+  logGrad.addColorStop(0.5, '#6d4c41');
+  logGrad.addColorStop(1, '#3e2723');
+
+  ctx.fillStyle = logGrad;
+  ctx.beginPath();
+  ctx.ellipse(0, logY, logW * 0.5, logH * 0.5, 0, 0, TAU);
+  ctx.fill();
+
+  // Rotating bark texture rings
+  ctx.strokeStyle = '#4e342e';
+  ctx.lineWidth = Math.max(1, 2.5 * sc);
+  const ringOff = (p.logRoll * 14 * sc) % (logW * 0.35);
+  for (let r = -logW * 0.35 + ringOff; r < logW * 0.45; r += logW * 0.28) {
+    ctx.beginPath();
+    ctx.moveTo(r, logY - logH * 0.45);
+    ctx.lineTo(r, logY + logH * 0.45);
+    ctx.stroke();
+  }
+
+  // --- 2. LUMBERJACK CHARACTER ---
+  ctx.rotate(p.tilt);
+
+  // Invulnerability blink
+  if (p.invuln > 0 && Math.floor(Date.now() / 80) % 2 === 0) {
+    ctx.globalAlpha = 0.4;
+  }
+
+  // Hydro Rooster Tail when River Rush is active
+  if (G.rush) {
+    ctx.fillStyle = 'rgba(255, 214, 0, 0.45)';
+    ctx.beginPath();
+    ctx.moveTo(-15 * sc, logY);
+    ctx.lineTo(0, -70 * sc);
+    ctx.lineTo(15 * sc, logY);
+    ctx.fill();
+  }
+
+  const sz = 42 * sc;
+
+  // Leather Work Boots
+  ctx.fillStyle = '#212121';
+  ctx.fillRect(-sz * 0.28, -sz * 0.12, sz * 0.22, sz * 0.15);
+  ctx.fillRect(sz * 0.06, -sz * 0.12, sz * 0.22, sz * 0.15);
+
+  // Denim Jeans
+  ctx.fillStyle = '#1565c0';
+  ctx.fillRect(-sz * 0.26, -sz * 0.48, sz * 0.2, sz * 0.4);
+  ctx.fillRect(sz * 0.06, -sz * 0.48, sz * 0.2, sz * 0.4);
+
+  // Plaid Flannel Shirt (Red & Black checks)
+  ctx.fillStyle = G.rush ? '#ffd54f' : '#d32f2f';
+  ctx.beginPath();
+  ctx.roundRect(-sz * 0.32, -sz * 0.95, sz * 0.64, sz * 0.52, 4 * sc);
+  ctx.fill();
+
+  // Dark suspenders
+  ctx.fillStyle = '#212121';
+  ctx.fillRect(-sz * 0.2, -sz * 0.95, sz * 0.08, sz * 0.52);
+  ctx.fillRect(sz * 0.12, -sz * 0.95, sz * 0.08, sz * 0.52);
+
+  // Head & Beard
+  ctx.fillStyle = '#ffcc80'; // Skin
+  ctx.beginPath();
+  ctx.arc(0, -sz * 1.15, sz * 0.18, 0, TAU);
+  ctx.fill();
+
+  // Bushy Brown Beard
+  ctx.fillStyle = '#5d4037';
+  ctx.beginPath();
+  ctx.arc(0, -sz * 1.1, sz * 0.19, 0, Math.PI);
+  ctx.fill();
+
+  // Lumberjack Toque / Knit Cap
+  ctx.fillStyle = '#b71c1c';
+  ctx.beginPath();
+  ctx.arc(0, -sz * 1.25, sz * 0.19, Math.PI, 0);
+  ctx.fill();
+
+  // Balancing Arms
+  ctx.strokeStyle = G.rush ? '#ffd54f' : '#d32f2f';
+  ctx.lineWidth = Math.max(2, 6 * sc);
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-sz * 0.28, -sz * 0.82);
+  ctx.lineTo(-sz * 0.65, -sz * 0.65);
+  ctx.moveTo(sz * 0.28, -sz * 0.82);
+  ctx.lineTo(sz * 0.65, -sz * 0.65);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawHUD() {
+  const g = G;
+  const pad = Math.max(12, W * 0.035);
+  const topY = safeTop + 10;
+  const fs = Math.min(1, W / 420);
+
+  // Left Panel: Score & Distance
+  ctx.fillStyle = 'rgba(11, 25, 30, 0.7)';
+  ctx.beginPath();
+  ctx.roundRect(pad, topY, 130 * fs, 58 * fs, 14);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  txt(String(Math.floor(g.score)), pad + 65 * fs, topY + 22 * fs, 22 * fs, '#ffffff');
+  txt(Math.floor(g.dist) + ' METERS', pad + 65 * fs, topY + 44 * fs, 11 * fs, '#ffd24a', 'bold', 0.95);
+
+  // Right Panel: Axes (Lives) & Speed
+  const rw = 120 * fs;
+  const rx = W - pad - rw;
+  ctx.fillStyle = 'rgba(11, 25, 30, 0.7)';
+  ctx.beginPath();
+  ctx.roundRect(rx, topY, rw, 58 * fs, 14);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+  ctx.stroke();
+
+  let axes = '';
+  for (let i = 0; i < 3; i++) axes += i < g.lives ? '🪓 ' : '▫ ';
+  txt(axes.trim(), rx + rw / 2, topY + 22 * fs, 16 * fs, '#ff5252');
+  txt(Math.floor(g.speed * 0.1) + ' KNOTS', rx + rw / 2, topY + 44 * fs, 11 * fs, '#4ae6ff', 'bold', 0.95);
+
+  // Streak Multiplier Pill
+  if (g.combo > 1) {
+    const pillW = 88 * fs;
+    ctx.fillStyle = g.rush ? 'rgba(255, 214, 0, 0.95)' : 'rgba(56, 217, 169, 0.88)';
+    ctx.beginPath();
+    ctx.roundRect(W / 2 - pillW / 2, topY + 8 * fs, pillW, 26 * fs, 13);
+    ctx.fill();
+    txt(g.combo + 'X STREAK', W / 2, topY + 21 * fs, 12 * fs, '#0b191e', '900');
+  }
+
+  // River Rush Gauge Bar
+  const barW = Math.min(240, W * 0.6);
+  const barY = H - 24;
+  ctx.fillStyle = 'rgba(11, 25, 30, 0.75)';
+  ctx.beginPath();
+  ctx.roundRect(W / 2 - barW / 2 - 4, barY - 14, barW + 8, 16, 6);
+  ctx.fill();
+
+  const fillRatio = g.rushTimer > 0 ? g.rushTimer / 6.0 : g.rush / 100;
+  ctx.fillStyle = g.rushTimer > 0 ? '#ffd24a' : '#38d9a9';
+  ctx.fillRect(W / 2 - barW / 2, barY - 10, barW * fillRatio, 8);
+  txt(g.rushTimer > 0 ? '★ RIVER RUSH ACTIVE! ★' : 'RIVER RUSH GAUGE', W / 2, barY - 22, 11 * fs, '#ffffff', 'bold');
+
+  // Onboarding Hint
+  if (g.hint > 0 && g.dist < 80) {
+    const hw = Math.min(W * 0.9, 440);
+    const hy = H * 0.32;
+    ctx.fillStyle = 'rgba(11, 25, 30, 0.88)';
+    ctx.beginPath();
+    ctx.roundRect(W / 2 - hw / 2, hy - 40, hw, 84, 16);
+    ctx.fill();
+    ctx.strokeStyle = '#38d9a9';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    txt('DRAG LEFT / RIGHT to balance & steer log!', W / 2, hy - 14, Math.min(16, W / 23), '#ffffff', 'bold');
+    txt('TAP to jump over log barriers & rocks!', W / 2, hy + 10, Math.min(14, W / 26), '#ffd24a', 'bold');
+    txt('Graze close to boulders for huge combo points.', W / 2, hy + 30, Math.min(13, W / 28), '#38d9a9', 'bold');
+  }
+}
+
+function drawPanel(title, tcol, sub, now) {
+  const g = G, pulse = Math.sin(now * 0.008);
+  const w = Math.min(W * 0.9, 400), x0 = (W - w) / 2, y0 = Math.max(safeTop + 25, H * 0.14), h = 380;
+
+  ctx.fillStyle = 'rgba(5, 12, 15, 0.88)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.fillStyle = 'rgba(14, 32, 38, 0.96)';
+  ctx.beginPath();
+  ctx.roundRect(x0, y0, w, h, 20);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  txt(title, W / 2, y0 + 38, Math.min(32, w / 10), tcol);
+  txt(sub, W / 2, y0 + 68, 14, '#94a3b8', 'bold', 0.9);
+
+  const finalScore = Math.floor(g.score + g.dist * 0.5);
+  txt(String(finalScore), W / 2, y0 + 118, 48, '#ffffff');
+  txt('TOTAL RUN SCORE', W / 2, y0 + 152, 12, '#ffd24a', 'bold');
+  txt('DISTANCE: ' + Math.floor(g.dist) + 'm', W / 2, y0 + 178, 14, '#4ae6ff', 'bold');
+
+  // Top 5 Leaderboard
+  txt('LOCAL LEADERBOARD', W / 2, y0 + 208, 11, '#64748b', 'bold');
+  top5.forEach((s, i) => {
+    const yy = y0 + 234 + i * 26;
+    const isMe = i === g.rank;
+    ctx.fillStyle = isMe ? 'rgba(56, 217, 169, 0.22)' : 'rgba(255,255,255,0.05)';
+    ctx.beginPath();
+    ctx.roundRect(x0 + 24, yy - 11, w - 48, 22, 6);
+    ctx.fill();
+
+    txt('#' + (i + 1), x0 + 44, yy, 12, i === 0 ? '#ffd24a' : '#ffffff', 'bold');
+    txt(String(s), x0 + w - 44, yy, 13, isMe ? '#38d9a9' : '#d8daf0', 'bold', 1, 'right');
+  });
+
+  if (performance.now() - overAt > 850) {
+    txt('TAP TO RETRY', W / 2, y0 + h + 32, 22, '#ffffff', 'bold', 0.65 + 0.35 * pulse);
+  }
+}
+
+function draw(now) {
+  const g = G, pulse = Math.sin(now * 0.008);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  ctx.save();
+  if (g.shake > 0) {
+    ctx.translate((Math.random() - 0.5) * 12 * g.shake, (Math.random() - 0.5) * 12 * g.shake);
+  }
+
+  drawRiverCanyon();
+  drawWorldObjects();
+
+  // Floating particles
+  for (const q of g.parts) {
+    const proj = Cam.project(q.x, q.y, q.z);
+    if (!proj) continue;
+    ctx.globalAlpha = clamp(q.life / q.max, 0, 1);
+    ctx.fillStyle = q.col;
+    ctx.fillRect(proj.x, proj.y, q.sz * proj.scale * scale, q.sz * proj.scale * scale);
+  }
+  ctx.globalAlpha = 1;
+
+  drawLumberjack();
+
+  // Floating Popups
+  for (const q of g.popups) {
+    const proj = Cam.project(q.x, q.y, g.dist);
+    if (!proj) continue;
+    txt(q.t, proj.x, proj.y, (18 * q.scale) * scale, q.col, 'bold', clamp(q.life * 1.5, 0, 1));
+  }
+
+  ctx.restore();
+
+  // Vignette overlay
+  const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.45, W / 2, H / 2, Math.max(W, H) * 0.85);
+  vg.addColorStop(0, 'rgba(0,0,0,0)');
+  vg.addColorStop(1, 'rgba(0,0,10,0.55)');
+  ctx.fillStyle = vg;
+  ctx.fillRect(0, 0, W, H);
+
+  // HUD & States
+  if (state === STATES.PLAYING) {
+    drawHUD();
+  } else if (state === STATES.START) {
+    ctx.fillStyle = 'rgba(6, 16, 20, 0.65)';
+    ctx.fillRect(0, 0, W, H);
+    txt('TIMBER RAPIDS', W / 2, H * 0.24, Math.min(54, W / 7), '#ffd24a');
+    txt('Ride the wild river. Master log treadmill physics.', W / 2, H * 0.24 + 48, Math.min(16, W / 24), '#ffffff', 'bold', 0.95);
+    txt('Drag to balance & steer. Tap to leap barriers.', W / 2, H * 0.24 + 74, Math.min(14, W / 26), '#94a3b8', 'bold', 0.9);
+    txt('TAP TO RUN RAPIDS', W / 2, H * 0.62, 24, '#ffffff', 'bold', 0.65 + 0.35 * pulse);
+    if (top5.length) txt('BEST RECORD  ' + top5[0], W / 2, H * 0.62 + 38, 16, '#ffd24a', 'bold');
+  } else if (state === STATES.GAMEOVER) {
+    drawPanel('RAPIDS WIPEOUT', '#ff5252', 'You were swept away by the river', now);
+  }
+}
+
+resize(); startLoop();
+})();
+</script>
+</body>
+</html>

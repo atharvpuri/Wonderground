@@ -1,0 +1,1562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Silk Weaver</title>
+  <style>
+    :root {
+      --bg-dark: #09090f;
+      --silk-gold: #fcc419;
+      --silk-rose: #ff6b8b;
+      --silk-cyan: #38d9a9;
+      --silk-violet: #a770ef;
+      --hud-panel: rgba(18, 14, 28, 0.85);
+      --hud-border: rgba(255, 255, 255, 0.12);
+      --text-main: #f8fafc;
+      --text-sub: #94a3b8;
+    }
+    [data-theme="emerald"] {
+      --silk-rose: #20c997;
+      --silk-gold: #ffd43b;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --hud-panel: rgba(12, 10, 20, 0.9);
+      }
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      overscroll-behavior: none;
+    }
+    #safe-inset-probe {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 0;
+      height: 0;
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      visibility: hidden;
+      pointer-events: none;
+    }
+    canvas#gameCanvas {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      touch-action: none;
+      display: block;
+      z-index: 1;
+    }
+  </style>
+</head>
+<body>
+  <div id="safe-inset-probe"></div>
+  <canvas id="gameCanvas"></canvas>
+
+  <script>
+  (function () {
+    'use strict';
+
+    // --- PROCEDURAL AUDIO SYSTEM (Web Audio API) ---
+    const Sound = {
+      ctx: null,
+      silkGain: null,
+      silkFilter: null,
+      initialized: false,
+
+      init() {
+        if (this.initialized) return;
+        try {
+          const AudioContext = window.AudioContext || window.webkitAudioContext;
+          if (!AudioContext) return;
+          this.ctx = new AudioContext();
+          this.setupAmbience();
+          this.initialized = true;
+        } catch (e) {
+          // Graceful fallback
+        }
+      },
+
+      resume() {
+        if (this.ctx && this.ctx.state === 'suspended') {
+          this.ctx.resume().catch(() => {});
+        }
+      },
+
+      setupAmbience() {
+        if (!this.ctx) return;
+        // Velvet fabric flutter & tension hum
+        const bufferSize = this.ctx.sampleRate * 2;
+        const noiseBuffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+        const output = noiseBuffer.getChannelData(0);
+        let b0 = 0, b1 = 0, b2 = 0;
+        for (let i = 0; i < bufferSize; i++) {
+          const white = Math.random() * 2 - 1;
+          b0 = 0.98 * b0 + white * 0.04;
+          b1 = 0.94 * b1 + white * 0.08;
+          b2 = 0.82 * b2 + white * 0.16;
+          output[i] = (b0 + b1 + b2) * 0.18;
+        }
+
+        const whiteNoise = this.ctx.createBufferSource();
+        whiteNoise.buffer = noiseBuffer;
+        whiteNoise.loop = true;
+
+        this.silkFilter = this.ctx.createBiquadFilter();
+        this.silkFilter.type = 'lowpass';
+        this.silkFilter.frequency.setValueAtTime(340, this.ctx.currentTime);
+
+        this.silkGain = this.ctx.createGain();
+        this.silkGain.gain.setValueAtTime(0.03, this.ctx.currentTime);
+
+        whiteNoise.connect(this.silkFilter);
+        this.silkFilter.connect(this.silkGain);
+        this.silkGain.connect(this.ctx.destination);
+        whiteNoise.start(0);
+      },
+
+      setThreadSpeed(ratio) {
+        if (!this.ctx || !this.silkGain || !this.silkFilter) return;
+        const clamped = Math.max(0, Math.min(1, ratio));
+        const now = this.ctx.currentTime;
+        this.silkFilter.frequency.setTargetAtTime(320 + clamped * 1400, now, 0.08);
+        this.silkGain.gain.setTargetAtTime(0.03 + clamped * 0.15, now, 0.08);
+      },
+
+      playFabricPierce(isDiving) {
+        if (!this.ctx) return;
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'triangle';
+        const startFreq = isDiving ? 420 : 620;
+        const endFreq = isDiving ? 180 : 380;
+        osc.frequency.setValueAtTime(startFreq, now);
+        osc.frequency.exponentialRampToValueAtTime(endFreq, now + 0.09);
+
+        gain.gain.setValueAtTime(0.35, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.11);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.12);
+      },
+
+      playButtonStitch(step) {
+        if (!this.ctx) return;
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        const notes = [523.25, 659.25, 783.99, 1046.5, 1318.5]; // C major pentatonic
+        const freq = notes[step % notes.length];
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, now);
+
+        gain.gain.setValueAtTime(0.4, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.32);
+
+        // Clinking mother-of-pearl overtone
+        const chime = this.ctx.createOscillator();
+        const chimeGain = this.ctx.createGain();
+        chime.type = 'triangle';
+        chime.frequency.setValueAtTime(freq * 2.5, now);
+        chimeGain.gain.setValueAtTime(0.2, now);
+        chimeGain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+        chime.connect(chimeGain);
+        chimeGain.connect(this.ctx.destination);
+        chime.start(now);
+        chime.stop(now + 0.2);
+      },
+
+      playSnagHit() {
+        if (!this.ctx) return;
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(220, now);
+        osc.frequency.linearRampToValueAtTime(45, now + 0.35);
+
+        gain.gain.setValueAtTime(0.65, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.42);
+      },
+
+      playSpoolCollect() {
+        if (!this.ctx) return;
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(880, now);
+        osc.frequency.exponentialRampToValueAtTime(1760, now + 0.2);
+
+        gain.gain.setValueAtTime(0.3, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.24);
+      },
+
+      playFrenzyIgnite() {
+        if (!this.ctx) return;
+        const now = this.ctx.currentTime;
+        [440, 554.37, 659.25, 880].forEach((freq, idx) => {
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          osc.type = 'triangle';
+          osc.frequency.setValueAtTime(freq, now + idx * 0.06);
+          gain.gain.setValueAtTime(0.25, now + idx * 0.06);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.06 + 0.35);
+          osc.connect(gain);
+          gain.connect(this.ctx.destination);
+          osc.start(now + idx * 0.06);
+          osc.stop(now + idx * 0.06 + 0.38);
+        });
+      }
+    };
+
+    // --- GAME CONSTANTS & ENUMS ---
+    const STATES = {
+      START: 0,
+      PLAYING: 1,
+      GAMEOVER: 2
+    };
+
+    const FABRIC_WIDTH = 340;
+    const NEEDLE_MAX_SPEED = 780;
+    const NEEDLE_BASE_SPEED = 340;
+    const DIVE_ALTITUDE = -42; // Under the cloth
+    const FLOAT_ALTITUDE = 38; // Above the cloth
+
+    // --- CANVAS & VIEWPORT SETUP ---
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const probe = document.getElementById('safe-inset-probe');
+
+    let W = window.innerWidth;
+    let H = window.innerHeight;
+    let dpr = Math.min(window.devicePixelRatio || 1, 3);
+    let safeTop = 0;
+    let safeBottom = 0;
+
+    function resize() {
+      W = window.innerWidth;
+      H = window.innerHeight;
+      dpr = Math.min(window.devicePixelRatio || 1, 3);
+      canvas.width = Math.floor(W * dpr);
+      canvas.height = Math.floor(H * dpr);
+      canvas.style.width = W + 'px';
+      canvas.style.height = H + 'px';
+
+      const style = getComputedStyle(probe);
+      safeTop = parseFloat(style.paddingTop) || 0;
+      safeBottom = parseFloat(style.paddingBottom) || 0;
+    }
+    window.addEventListener('resize', resize);
+    window.addEventListener('orientationchange', resize);
+    resize();
+
+    // --- LOCAL STORAGE MANAGER ---
+    const STORAGE_KEY = 'silk_weaver_v1_save';
+    function loadSaveData() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return { highScores: [0, 0, 0, 0, 0], maxMeters: 0, maxCombo: 0, buttonsStitched: 0 };
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed.highScores)) parsed.highScores = [0, 0, 0, 0, 0];
+        while (parsed.highScores.length < 5) parsed.highScores.push(0);
+        parsed.highScores = parsed.highScores.slice(0, 5).map(v => Math.max(0, parseInt(v) || 0));
+        parsed.maxMeters = Math.max(0, parseInt(parsed.maxMeters) || 0);
+        parsed.maxCombo = Math.max(0, parseInt(parsed.maxCombo) || 0);
+        parsed.buttonsStitched = Math.max(0, parseInt(parsed.buttonsStitched) || 0);
+        return parsed;
+      } catch (e) {
+        return { highScores: [0, 0, 0, 0, 0], maxMeters: 0, maxCombo: 0, buttonsStitched: 0 };
+      }
+    }
+
+    function saveScore(score, meters, combo, buttons) {
+      try {
+        const data = loadSaveData();
+        data.highScores.push(Math.floor(score));
+        data.highScores.sort((a, b) => b - a);
+        data.highScores = data.highScores.slice(0, 5);
+        data.maxMeters = Math.max(data.maxMeters, Math.floor(meters));
+        data.maxCombo = Math.max(data.maxCombo, Math.floor(combo));
+        data.buttonsStitched = (data.buttonsStitched || 0) + buttons;
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+        return {
+          rank: data.highScores.indexOf(Math.floor(score)) + 1,
+          isHigh: score > 0 && score === data.highScores[0],
+          data
+        };
+      } catch (e) {
+        return { rank: 1, isHigh: true, data: { highScores: [score, 0, 0, 0, 0], maxMeters: meters, maxCombo: combo, buttonsStitched: buttons } };
+      }
+    }
+
+    // --- FABRIC BIOMES & WEAVES ---
+    const BIOMES = [
+      { name: 'Royal Indigo Velvet', main: '#1c1b3d', dark: '#111026', accent: '#7048e8', thread: '#ff6b8b' },
+      { name: 'Emerald Damask Silk', main: '#0c2d27', dark: '#071b17', accent: '#20c997', thread: '#ffd43b' },
+      { name: 'Imperial Crimson Satin', main: '#380e19', dark: '#22080f', accent: '#ff4757', thread: '#38d9a9' },
+      { name: 'Celestial Gold Brocade', main: '#2c220a', dark: '#1c1506', accent: '#fcc419', thread: '#f06595' }
+    ];
+
+    // --- 3D PERSPECTIVE CAMERA ---
+    const Camera = {
+      x: 0,
+      y: 85,
+      z: 0,
+      fov: 340,
+      pitch: 0.12,
+
+      project(worldX, worldY, worldZ) {
+        const relZ = worldZ - this.z;
+        if (relZ <= 12) return null; // Near clipping plane
+        const scale = this.fov / relZ;
+        const relX = worldX - this.x;
+        const relY = worldY - this.y;
+
+        const screenX = W * 0.5 + relX * scale;
+        const screenY = H * 0.58 - (relY - relZ * this.pitch) * scale;
+        return { x: screenX, y: screenY, scale: scale, depth: relZ };
+      }
+    };
+
+    // --- NEEDLE HERO OBJECT ---
+    const Needle = {
+      x: 0,
+      targetX: 0,
+      y: FLOAT_ALTITUDE,
+      targetY: FLOAT_ALTITUDE,
+      z: 0,
+      speed: NEEDLE_BASE_SPEED,
+      isDiving: false,
+      lastAltitudeSign: 1, // 1 for above, -1 for below
+      roll: 0,
+      invulnTimer: 0,
+
+      reset() {
+        this.x = 0;
+        this.targetX = 0;
+        this.y = FLOAT_ALTITUDE;
+        this.targetY = FLOAT_ALTITUDE;
+        this.z = 0;
+        this.speed = NEEDLE_BASE_SPEED;
+        this.isDiving = false;
+        this.lastAltitudeSign = 1;
+        this.roll = 0;
+        this.invulnTimer = 0;
+      },
+
+      update(dt) {
+        // Accelerate forward with distance
+        const speedRatio = Math.min(1, this.z / 6500);
+        this.speed = NEEDLE_BASE_SPEED + (NEEDLE_MAX_SPEED - NEEDLE_BASE_SPEED) * speedRatio;
+        if (frenzyTimer > 0) this.speed *= 1.35;
+
+        this.z += this.speed * dt;
+        Sound.setThreadSpeed(this.speed / NEEDLE_MAX_SPEED);
+
+        // Smooth horizontal steering
+        const dx = this.targetX - this.x;
+        this.roll = Math.max(-0.45, Math.min(0.45, dx * 0.007));
+        this.x += dx * Math.min(1, dt * 8.5);
+
+        // Ribbon boundary limits
+        const maxSpan = FABRIC_WIDTH * 0.44;
+        this.x = Math.max(-maxSpan, Math.min(maxSpan, this.x));
+
+        // Smooth vertical dive / float
+        this.targetY = this.isDiving ? DIVE_ALTITUDE : FLOAT_ALTITUDE;
+        const prevY = this.y;
+        this.y += (this.targetY - this.y) * Math.min(1, dt * 14);
+
+        // Cloth Puncture Check (crosses y = 0)
+        const currentSign = Math.sign(this.y);
+        if (currentSign !== 0 && currentSign !== this.lastAltitudeSign) {
+          this.onClothPierce(currentSign < 0);
+          this.lastAltitudeSign = currentSign;
+        }
+
+        if (this.invulnTimer > 0) {
+          this.invulnTimer -= dt;
+        }
+
+        // Camera smoothly follows needle forward
+        Camera.z = this.z - 130;
+        Camera.x += (this.x * 0.4 - Camera.x) * Math.min(1, dt * 6);
+        Camera.y = 85 + Math.sin(this.z * 0.005) * 6;
+      },
+
+      onClothPierce(isDiving) {
+        Sound.playFabricPierce(isDiving);
+        screenShake = Math.max(screenShake, 3.5);
+
+        // Create stitch node in history
+        Stitches.addNode(this.x, 0, this.z, isDiving);
+
+        // Puff of cloth fiber particles
+        for (let i = 0; i < 7; i++) {
+          const ang = Math.random() * Math.PI * 2;
+          const spd = 20 + Math.random() * 50;
+          Particles.add(
+            this.x,
+            0,
+            this.z,
+            Math.cos(ang) * spd,
+            (isDiving ? -1 : 1) * (30 + Math.random() * 40),
+            Math.sin(ang) * spd,
+            '#f8fafc',
+            2.5,
+            0.35
+          );
+        }
+
+        if (onboardingActive) onboardingActive = false;
+      },
+
+      hit() {
+        if (this.invulnTimer > 0 || frenzyTimer > 0) return;
+        this.invulnTimer = 1.8;
+        hearts--;
+        combo = 0;
+        screenShake = 22;
+        Sound.playSnagHit();
+
+        Popups.add(this.x, this.y + 20, this.z, 'THREAD SNAGGED!', '#ff4757', 1.25, '-1 NEEDLE');
+
+        for (let i = 0; i < 24; i++) {
+          const ang = Math.random() * Math.PI * 2;
+          const spd = 40 + Math.random() * 160;
+          Particles.add(this.x, this.y, this.z, Math.cos(ang) * spd, (Math.random() - 0.5) * 120, Math.sin(ang) * spd, '#ff6b8b', 3.5, 0.55);
+        }
+
+        if (hearts <= 0) {
+          triggerGameOver();
+        }
+      }
+    };
+
+    // --- STITCHES (TRAILING SILK THREAD TRAIL) ---
+    const Stitches = {
+      nodes: [],
+
+      reset() {
+        this.nodes = [];
+      },
+
+      addNode(x, y, z, isDiving) {
+        this.nodes.push({ x, y, z, isDiving });
+        if (this.nodes.length > 120) {
+          this.nodes.shift();
+        }
+      },
+
+      draw() {
+        if (this.nodes.length < 2) return;
+
+        const currentBiome = BIOMES[Math.floor(Needle.z / 3200) % BIOMES.length];
+        const threadColor = frenzyTimer > 0 ? '#ffd43b' : currentBiome.thread;
+
+        ctx.save();
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+
+        // Connect needle eye to most recent stitch puncture
+        const tipProj = Camera.project(Needle.x, Needle.y, Needle.z);
+        const lastNode = this.nodes[this.nodes.length - 1];
+        const lastProj = Camera.project(lastNode.x, lastNode.y, lastNode.z);
+
+        if (tipProj && lastProj) {
+          ctx.strokeStyle = threadColor;
+          ctx.lineWidth = Math.max(2, 4.5 * tipProj.scale);
+          ctx.beginPath();
+          ctx.moveTo(tipProj.x, tipProj.y);
+          ctx.lineTo(lastProj.x, lastProj.y);
+          ctx.stroke();
+        }
+
+        // Render past stitches pinned through the fabric
+        for (let i = 0; i < this.nodes.length - 1; i++) {
+          const n1 = this.nodes[i];
+          const n2 = this.nodes[i + 1];
+          const p1 = Camera.project(n1.x, n1.y, n1.z);
+          const p2 = Camera.project(n2.x, n2.y, n2.z);
+
+          if (!p1 || !p2) continue;
+
+          // Under-cloth stitches are dimmer
+          const isUnder = n1.isDiving;
+          ctx.strokeStyle = isUnder ? 'rgba(0, 0, 0, 0.45)' : threadColor;
+          ctx.lineWidth = Math.max(1.5, (isUnder ? 2.5 : 4.0) * p1.scale);
+
+          ctx.beginPath();
+          ctx.moveTo(p1.x, p1.y);
+          ctx.lineTo(p2.x, p2.y);
+          ctx.stroke();
+
+          // Tiny knot rings at each pierce hole
+          if (!isUnder) {
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.arc(p1.x, p1.y, Math.max(1.5, 2.8 * p1.scale), 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+        ctx.restore();
+      }
+    };
+
+    // --- TRACK OBSTACLES: BUTTONS, PINS, SPOOLS ---
+    const WorldObjects = {
+      buttons: [],
+      pins: [],
+      spools: [],
+      nextSpawnZ: 400,
+
+      reset() {
+        this.buttons = [];
+        this.pins = [];
+        this.spools = [];
+        this.nextSpawnZ = 400;
+        this.populate(1800);
+      },
+
+      populate(upToZ) {
+        while (this.nextSpawnZ < upToZ) {
+          this.spawnSegment(this.nextSpawnZ);
+          this.nextSpawnZ += 280 + Math.random() * 180;
+        }
+      },
+
+      spawnSegment(z) {
+        const roll = Math.random();
+        const laneX = (Math.random() - 0.5) * (FABRIC_WIDTH * 0.65);
+
+        if (roll < 0.42) {
+          // Mother-of-Pearl Button (2 holes along Z)
+          this.buttons.push({
+            x: laneX,
+            z: z,
+            radius: 26,
+            holeDist: 14,
+            hole1Stitched: false,
+            hole2Stitched: false,
+            fullyStitched: false,
+            color: ['#f8fafc', '#ffd43b', '#a5d8ff', '#ffc9c9'][Math.floor(Math.random() * 4)]
+          });
+        } else if (roll < 0.78) {
+          // Dressmaker Pin (Hazard - must dive under cloth to dodge!)
+          // Or Under-snag (Hazard - must stay above cloth to dodge!)
+          const isUnderside = Math.random() < 0.35;
+          this.pins.push({
+            x: laneX,
+            z: z,
+            isUnderside: isUnderside,
+            height: 52,
+            pearlColor: isUnderside ? '#ff922b' : '#ff4757'
+          });
+        } else {
+          // Golden Silk Spool (Collectible - fills frenzy meter)
+          this.spools.push({
+            x: laneX,
+            z: z,
+            y: FLOAT_ALTITUDE * 0.8,
+            collected: false,
+            rot: 0
+          });
+        }
+      },
+
+      update(dt) {
+        this.populate(Needle.z + 1800);
+
+        // 1. Check Button Eyelet Threading
+        for (let i = this.buttons.length - 1; i >= 0; i--) {
+          const btn = this.buttons[i];
+
+          // Clean up passed buttons
+          if (btn.z < Needle.z - 200) {
+            this.buttons.splice(i, 1);
+            continue;
+          }
+
+          if (btn.fullyStitched) continue;
+
+          const hole1Z = btn.z - btn.holeDist;
+          const hole2Z = btn.z + btn.holeDist;
+          const dist1 = Math.hypot(Needle.x - btn.x, Needle.z - hole1Z);
+          const dist2 = Math.hypot(Needle.x - btn.x, Needle.z - hole2Z);
+
+          // Hole 1: Needle must dive DOWN through hole
+          if (!btn.hole1Stitched && dist1 < 22 && Needle.isDiving && Needle.y < 5) {
+            btn.hole1Stitched = true;
+            Sound.playButtonStitch(combo);
+            screenShake = Math.max(screenShake, 4);
+            Popups.add(btn.x, 20, hole1Z, 'EYELET #1', '#ffd43b', 1.0);
+          }
+
+          // Hole 2: Needle must rise UP through hole
+          if (btn.hole1Stitched && !btn.hole2Stitched && dist2 < 22 && !Needle.isDiving && Needle.y > -5) {
+            btn.hole2Stitched = true;
+            btn.fullyStitched = true;
+            totalButtonsStitched++;
+            combo++;
+            comboTimer = 5.0;
+            maxComboRecord = Math.max(maxComboRecord, combo);
+
+            goldenThreadGauge = Math.min(100, goldenThreadGauge + 25);
+            if (goldenThreadGauge >= 100 && frenzyTimer <= 0) {
+              frenzyTimer = 7.5;
+              goldenThreadGauge = 0;
+              Sound.playFrenzyIgnite();
+              Popups.add(Needle.x, Needle.y + 35, Needle.z, 'GOLDEN EMBROIDERY!', '#ffd43b', 1.45, 'INVINCIBLE BLISS');
+            }
+
+            const pts = Math.floor(400 * (1 + combo * 0.3));
+            score += pts;
+            Sound.playButtonStitch(combo + 1);
+
+            screenShake = Math.max(screenShake, 8);
+            Popups.add(btn.x, 30, hole2Z, `BUTTON SECURED! +${pts}`, '#38d9a9', 1.3, `${combo}x Stitch Streak`);
+
+            for (let p = 0; p < 18; p++) {
+              const ang = Math.random() * Math.PI * 2;
+              const spd = 30 + Math.random() * 90;
+              Particles.add(btn.x, 15, hole2Z, Math.cos(ang) * spd, 40 + Math.random() * 60, Math.sin(ang) * spd, '#ffd43b', 3, 0.5);
+            }
+          }
+        }
+
+        // 2. Check Pin Collisions
+        for (let i = this.pins.length - 1; i >= 0; i--) {
+          const pin = this.pins[i];
+          if (pin.z < Needle.z - 200) {
+            this.pins.splice(i, 1);
+            continue;
+          }
+
+          const distZ = Math.abs(Needle.z - pin.z);
+          const distX = Math.abs(Needle.x - pin.x);
+
+          if (distZ < 16 && distX < 18) {
+            // Collision rule: Topside pins hit needle if needle is above cloth (y > 0)
+            // Underside snags hit needle if needle is below cloth (y < 0)
+            if (!pin.isUnderside && Needle.y > -2) {
+              Needle.hit();
+            } else if (pin.isUnderside && Needle.y < 2) {
+              Needle.hit();
+            }
+          }
+        }
+
+        // 3. Check Spool Collections
+        for (let i = this.spools.length - 1; i >= 0; i--) {
+          const sp = this.spools[i];
+          if (sp.z < Needle.z - 200) {
+            this.spools.splice(i, 1);
+            continue;
+          }
+
+          if (sp.collected) continue;
+          sp.rot += dt * 5;
+
+          const dist = Math.hypot(Needle.x - sp.x, Needle.z - sp.z);
+          if (dist < 28 && Math.abs(Needle.y - sp.y) < 35) {
+            sp.collected = true;
+            Sound.playSpoolCollect();
+            score += 150;
+            goldenThreadGauge = Math.min(100, goldenThreadGauge + 18);
+            Popups.add(sp.x, sp.y + 15, sp.z, 'SILK SPOOL +150', '#ffd43b', 1.05);
+
+            for (let p = 0; p < 12; p++) {
+              const ang = Math.random() * Math.PI * 2;
+              const spd = 20 + Math.random() * 60;
+              Particles.add(sp.x, sp.y, sp.z, Math.cos(ang) * spd, Math.sin(ang) * spd, 20, '#ffd43b', 2.8, 0.4);
+            }
+          }
+        }
+      },
+
+      draw() {
+        // Collect, depth-sort and draw in correct painter's order
+        const renderQueue = [];
+
+        // 1. Buttons
+        for (let i = 0; i < this.buttons.length; i++) {
+          const b = this.buttons[i];
+          const proj = Camera.project(b.x, 0, b.z);
+          if (proj) renderQueue.push({ type: 'button', obj: b, proj, depth: proj.depth });
+        }
+
+        // 2. Pins
+        for (let i = 0; i < this.pins.length; i++) {
+          const p = this.pins[i];
+          const baseY = p.isUnderside ? 0 : 0;
+          const proj = Camera.project(p.x, baseY, p.z);
+          if (proj) renderQueue.push({ type: 'pin', obj: p, proj, depth: proj.depth });
+        }
+
+        // 3. Spools
+        for (let i = 0; i < this.spools.length; i++) {
+          const sp = this.spools[i];
+          if (sp.collected) continue;
+          const proj = Camera.project(sp.x, sp.y, sp.z);
+          if (proj) renderQueue.push({ type: 'spool', obj: sp, proj, depth: proj.depth });
+        }
+
+        // Depth sort furthest to nearest
+        renderQueue.sort((a, b) => b.depth - a.depth);
+
+        for (let i = 0; i < renderQueue.length; i++) {
+          const item = renderQueue[i];
+          if (item.type === 'button') this.drawButton(item.obj, item.proj);
+          else if (item.type === 'pin') this.drawPin(item.obj, item.proj);
+          else if (item.type === 'spool') this.drawSpool(item.obj, item.proj);
+        }
+      },
+
+      drawButton(b, proj) {
+        ctx.save();
+        const r = b.radius * proj.scale;
+        if (r < 1.5) { ctx.restore(); return; }
+
+        // Button Rim Shadow
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+        ctx.beginPath();
+        ctx.ellipse(proj.x + 4 * proj.scale, proj.y + 6 * proj.scale, r * 1.05, r * 0.75, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Mother-of-Pearl Rim
+        const grad = ctx.createRadialGradient(proj.x - r * 0.3, proj.y - r * 0.3, r * 0.1, proj.x, proj.y, r);
+        grad.addColorStop(0, '#ffffff');
+        grad.addColorStop(0.65, b.color);
+        grad.addColorStop(1, '#adb5bd');
+
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.ellipse(proj.x, proj.y, r, r * 0.72, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Inner Inset Rim
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.18)';
+        ctx.lineWidth = Math.max(1, 2 * proj.scale);
+        ctx.beginPath();
+        ctx.ellipse(proj.x, proj.y, r * 0.65, r * 0.45, 0, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Eyelet Holes (Hole 1 and Hole 2)
+        const holeR = Math.max(1.8, 3.8 * proj.scale);
+        const h1Proj = Camera.project(b.x, 0, b.z - b.holeDist);
+        const h2Proj = Camera.project(b.x, 0, b.z + b.holeDist);
+
+        if (h1Proj) {
+          ctx.fillStyle = b.hole1Stitched ? '#38d9a9' : '#09090f';
+          ctx.beginPath();
+          ctx.arc(h1Proj.x, h1Proj.y, holeR, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        if (h2Proj) {
+          ctx.fillStyle = b.hole2Stitched ? '#38d9a9' : '#09090f';
+          ctx.beginPath();
+          ctx.arc(h2Proj.x, h2Proj.y, holeR, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.restore();
+      },
+
+      drawPin(p, proj) {
+        ctx.save();
+        const pinH = p.height * proj.scale;
+        const dir = p.isUnderside ? -1 : 1; // Points down or up
+        const tipY = proj.y - pinH * dir;
+
+        // Needle shaft (chrome)
+        ctx.strokeStyle = '#ced4da';
+        ctx.lineWidth = Math.max(1.2, 2.8 * proj.scale);
+        ctx.beginPath();
+        ctx.moveTo(proj.x, proj.y);
+        ctx.lineTo(proj.x, tipY);
+        ctx.stroke();
+
+        // Pearl Pinhead Sphere
+        const pearlR = Math.max(3, 7.5 * proj.scale);
+        const pearlGrad = ctx.createRadialGradient(proj.x - pearlR * 0.3, tipY - pearlR * 0.3, pearlR * 0.1, proj.x, tipY, pearlR);
+        pearlGrad.addColorStop(0, '#ffffff');
+        pearlGrad.addColorStop(0.5, p.pearlColor);
+        pearlGrad.addColorStop(1, '#000000');
+
+        ctx.fillStyle = pearlGrad;
+        ctx.beginPath();
+        ctx.arc(proj.x, tipY, pearlR, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Highlight ring
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.restore();
+      },
+
+      drawSpool(sp, proj) {
+        ctx.save();
+        const r = 16 * proj.scale;
+        ctx.translate(proj.x, proj.y);
+        ctx.rotate(sp.rot);
+
+        // Golden Spool
+        ctx.fillStyle = '#fcc419';
+        ctx.beginPath();
+        ctx.roundRect(-r, -r * 0.6, r * 2, r * 1.2, 3 * proj.scale);
+        ctx.fill();
+
+        // Silk winding strands
+        ctx.strokeStyle = '#ffe066';
+        ctx.lineWidth = Math.max(1, 2 * proj.scale);
+        for (let l = -r * 0.4; l <= r * 0.4; l += r * 0.3) {
+          ctx.beginPath();
+          ctx.moveTo(-r * 0.8, l);
+          ctx.lineTo(r * 0.8, l);
+          ctx.stroke();
+        }
+
+        ctx.restore();
+      }
+    };
+
+    // --- 3D FABRIC RIBBON MESH RENDERING ---
+    function drawFabricRibbon() {
+      const stepZ = 45;
+      const startZ = Math.floor(Camera.z / stepZ) * stepZ;
+      const endZ = startZ + 1450;
+      const currentBiome = BIOMES[Math.floor(Needle.z / 3200) % BIOMES.length];
+
+      ctx.save();
+
+      // Render ribbon segments from far to near (painter's algorithm)
+      for (let z = endZ; z >= startZ; z -= stepZ) {
+        const zNext = z + stepZ;
+        const halfW = FABRIC_WIDTH * 0.5;
+
+        // Undulating wave curves along the ribbon
+        const wave1 = Math.sin(z * 0.0035) * 14;
+        const wave2 = Math.sin(zNext * 0.0035) * 14;
+
+        const pL1 = Camera.project(-halfW, wave1, z);
+        const pR1 = Camera.project(halfW, wave1, z);
+        const pL2 = Camera.project(-halfW, wave2, zNext);
+        const pR2 = Camera.project(halfW, wave2, zNext);
+
+        if (!pL1 || !pR1 || !pL2 || !pR2) continue;
+
+        // Segment shading with weave stripes
+        const stripe = Math.floor(z / stepZ) % 2 === 0;
+        ctx.fillStyle = stripe ? currentBiome.main : currentBiome.dark;
+
+        ctx.beginPath();
+        ctx.moveTo(pL1.x, pL1.y);
+        ctx.lineTo(pR1.x, pR1.y);
+        ctx.lineTo(pR2.x, pR2.y);
+        ctx.lineTo(pL2.x, pL2.y);
+        ctx.closePath();
+        ctx.fill();
+
+        // Golden Selvage Hem edges
+        ctx.strokeStyle = currentBiome.accent;
+        ctx.lineWidth = Math.max(1, 2.5 * pL1.scale);
+        ctx.beginPath();
+        ctx.moveTo(pL1.x, pL1.y);
+        ctx.lineTo(pL2.x, pL2.y);
+        ctx.moveTo(pR1.x, pR1.y);
+        ctx.lineTo(pR2.x, pR2.y);
+        ctx.stroke();
+      }
+
+      ctx.restore();
+    }
+
+    // --- NEEDLE RENDERING (3D SPECULAR CHROME) ---
+    function drawNeedle() {
+      const proj = Camera.project(Needle.x, Needle.y, Needle.z);
+      if (!proj) return;
+
+      ctx.save();
+      ctx.translate(proj.x, proj.y);
+      ctx.rotate(Needle.roll);
+
+      const length = 56 * proj.scale;
+      const width = 7.5 * proj.scale;
+
+      // Needle Cast Shadow on Fabric (converges when Needle.y reaches 0)
+      const shadowDist = Needle.y;
+      const shadowProj = Camera.project(Needle.x + 8, 0, Needle.z);
+      if (shadowProj) {
+        ctx.save();
+        const shadowAlpha = Math.max(0.12, 0.45 - Math.abs(shadowDist) * 0.008);
+        ctx.fillStyle = `rgba(0, 0, 0, ${shadowAlpha})`;
+        ctx.beginPath();
+        ctx.ellipse(shadowProj.x - proj.x, shadowProj.y - proj.y, width * 1.4, length * 0.35, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // Invulnerability blink
+      if (Needle.invulnTimer > 0 && Math.floor(Date.now() / 80) % 2 === 0) {
+        ctx.globalAlpha = 0.4;
+      }
+
+      // Chrome Tapered Shaft
+      const shaftGrad = ctx.createLinearGradient(-width, 0, width, 0);
+      if (frenzyTimer > 0) {
+        shaftGrad.addColorStop(0, '#ffe066');
+        shaftGrad.addColorStop(0.5, '#ffffff');
+        shaftGrad.addColorStop(1, '#f59f00');
+      } else {
+        shaftGrad.addColorStop(0, '#64748b');
+        shaftGrad.addColorStop(0.35, '#f8fafc');
+        shaftGrad.addColorStop(0.7, '#cbd5e1');
+        shaftGrad.addColorStop(1, '#334155');
+      }
+
+      ctx.fillStyle = shaftGrad;
+      ctx.beginPath();
+      // Sharp pointed tip facing forward
+      ctx.moveTo(0, -length * 0.7);
+      ctx.lineTo(width * 0.5, length * 0.5);
+      ctx.lineTo(-width * 0.5, length * 0.5);
+      ctx.closePath();
+      ctx.fill();
+
+      // Eyelet Hole in Needle Tail
+      const eyeW = width * 0.35;
+      const eyeH = length * 0.22;
+      const eyeY = length * 0.25;
+
+      ctx.fillStyle = '#09090f';
+      ctx.beginPath();
+      ctx.ellipse(0, eyeY, eyeW, eyeH, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Specular Rim Highlight
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = Math.max(1, 1.4 * proj.scale);
+      ctx.beginPath();
+      ctx.moveTo(-width * 0.1, -length * 0.65);
+      ctx.lineTo(-width * 0.1, length * 0.3);
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    // --- PARTICLES & POPUPS ---
+    const Particles = {
+      list: [],
+
+      add(x, y, z, vx, vy, vz, color, size, life) {
+        if (this.list.length > 220) this.list.shift();
+        this.list.push({ x, y, z, vx, vy, vz, color, size, life, maxLife: life });
+      },
+
+      update(dt) {
+        for (let i = this.list.length - 1; i >= 0; i--) {
+          const p = this.list[i];
+          p.life -= dt;
+          if (p.life <= 0) {
+            this.list.splice(i, 1);
+            continue;
+          }
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          p.z += p.vz * dt;
+        }
+      },
+
+      draw() {
+        for (let i = 0; i < this.list.length; i++) {
+          const p = this.list[i];
+          const proj = Camera.project(p.x, p.y, p.z);
+          if (!proj) continue;
+
+          const alpha = p.life / p.maxLife;
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          ctx.fillStyle = p.color;
+          ctx.beginPath();
+          ctx.arc(proj.x, proj.y, Math.max(1, p.size * proj.scale), 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+    };
+
+    const Popups = {
+      list: [],
+
+      add(x, y, z, text, color, scale = 1, subtitle = '') {
+        this.list.push({ x, y, z, text, color, scale, subtitle, life: 1.0, vy: 35 });
+      },
+
+      update(dt) {
+        for (let i = this.list.length - 1; i >= 0; i--) {
+          const pop = this.list[i];
+          pop.life -= dt;
+          if (pop.life <= 0) {
+            this.list.splice(i, 1);
+            continue;
+          }
+          pop.y += pop.vy * dt;
+        }
+      },
+
+      draw() {
+        for (let i = 0; i < this.list.length; i++) {
+          const pop = this.list[i];
+          const proj = Camera.project(pop.x, pop.y, pop.z);
+          if (!proj) continue;
+
+          const alpha = Math.min(1, pop.life * 1.6);
+          ctx.save();
+          ctx.textAlign = 'center';
+          ctx.globalAlpha = alpha;
+
+          const fontSize = Math.floor(19 * pop.scale);
+          ctx.font = `900 ${fontSize}px sans-serif`;
+          ctx.fillStyle = '#09090f';
+          ctx.fillText(pop.text, proj.x + 1, proj.y + 1);
+          ctx.fillStyle = pop.color;
+          ctx.fillText(pop.text, proj.x, proj.y);
+
+          if (pop.subtitle) {
+            const subSize = Math.max(10, Math.floor(11 * pop.scale));
+            ctx.font = `700 ${subSize}px sans-serif`;
+            ctx.fillStyle = '#ffffff';
+            ctx.fillText(pop.subtitle, proj.x, proj.y + fontSize * 0.85);
+          }
+          ctx.restore();
+        }
+      }
+    };
+
+    // --- GAME ENGINE STATE & PROGRESSION ---
+    let gameState = STATES.START;
+    let score = 0;
+    let displayScore = 0;
+    let combo = 0;
+    let comboTimer = 0;
+    let maxComboRecord = 0;
+    let totalButtonsStitched = 0;
+    let hearts = 3;
+    let goldenThreadGauge = 0; // 0 to 100
+    let frenzyTimer = 0;
+    let gameTime = 0;
+    let lastTime = 0;
+    let rAFId = null;
+    let screenShake = 0;
+    let gameOverSaved = false;
+    let gameOverTimer = 0;
+    let lastSaveResult = null;
+    let onboardingActive = true;
+
+    function triggerGameOver() {
+      gameState = STATES.GAMEOVER;
+      gameOverTimer = 0;
+      if (!gameOverSaved) {
+        gameOverSaved = true;
+        const meters = Math.floor(Needle.z / 10);
+        lastSaveResult = saveScore(score, meters, maxComboRecord, totalButtonsStitched);
+      }
+    }
+
+    function resetGame() {
+      score = 0;
+      displayScore = 0;
+      combo = 0;
+      comboTimer = 0;
+      maxComboRecord = 0;
+      totalButtonsStitched = 0;
+      hearts = 3;
+      goldenThreadGauge = 0;
+      frenzyTimer = 0;
+      gameTime = 0;
+      screenShake = 0;
+      gameOverSaved = false;
+      gameOverTimer = 0;
+      lastSaveResult = null;
+
+      Particles.list = [];
+      Popups.list = [];
+      Stitches.reset();
+      Needle.reset();
+      WorldObjects.reset();
+      gameState = STATES.PLAYING;
+    }
+
+    // --- INPUT HANDLING ---
+    const Input = {
+      isDown: false,
+      pointerX: W * 0.5,
+
+      onDown(x) {
+        Sound.init();
+        Sound.resume();
+
+        if (gameState === STATES.START) {
+          resetGame();
+          return;
+        }
+
+        if (gameState === STATES.GAMEOVER) {
+          if (gameOverTimer > 0.8) {
+            resetGame();
+          }
+          return;
+        }
+
+        if (gameState === STATES.PLAYING) {
+          this.isDown = true;
+          this.pointerX = x;
+          Needle.isDiving = true; // Hold = Dive underneath fabric
+          const normX = (x / W - 0.5) * FABRIC_WIDTH * 0.95;
+          Needle.targetX = normX;
+        }
+      },
+
+      onMove(x) {
+        this.pointerX = x;
+        if (gameState === STATES.PLAYING) {
+          const normX = (x / W - 0.5) * FABRIC_WIDTH * 0.95;
+          Needle.targetX = normX;
+        }
+      },
+
+      onUp() {
+        if (gameState === STATES.PLAYING && this.isDown) {
+          this.isDown = false;
+          Needle.isDiving = false; // Release = Rise back to topside
+        }
+      }
+    };
+
+    // Canvas pointer listeners
+    canvas.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      canvas.setPointerCapture(e.pointerId);
+      const rect = canvas.getBoundingClientRect();
+      Input.onDown(e.clientX - rect.left);
+    });
+
+    canvas.addEventListener('pointermove', (e) => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      Input.onMove(e.clientX - rect.left);
+    });
+
+    canvas.addEventListener('pointerup', (e) => {
+      e.preventDefault();
+      Input.onUp();
+    });
+
+    canvas.addEventListener('pointercancel', (e) => {
+      e.preventDefault();
+      Input.onUp();
+    });
+
+    // Keyboard support for desktop
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Space' || e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') {
+        if (!e.repeat) {
+          if (gameState === STATES.START) resetGame();
+          else if (gameState === STATES.GAMEOVER && gameOverTimer > 0.8) resetGame();
+          else if (gameState === STATES.PLAYING) {
+            Input.isDown = true;
+            Needle.isDiving = true;
+          }
+        }
+      }
+      const step = 28;
+      if (gameState === STATES.PLAYING) {
+        if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') Needle.targetX -= step;
+        if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') Needle.targetX += step;
+      }
+    });
+
+    window.addEventListener('keyup', (e) => {
+      if (e.code === 'Space' || e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') {
+        if (gameState === STATES.PLAYING && Input.isDown) {
+          Input.isDown = false;
+          Needle.isDiving = false;
+        }
+      }
+    });
+
+    // Guard against tab blurs
+    window.addEventListener('blur', () => {
+      Input.isDown = false;
+      Needle.isDiving = false;
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        Input.isDown = false;
+        Needle.isDiving = false;
+      }
+    });
+
+    // --- HUD AND GAUGES ---
+    function drawHUD() {
+      const pad = 16;
+      const topY = safeTop + pad;
+
+      ctx.save();
+      // 1. Score readout
+      ctx.textAlign = 'left';
+      ctx.font = '900 24px sans-serif';
+      ctx.fillStyle = '#ffffff';
+      displayScore += (score - displayScore) * 0.16;
+      ctx.fillText(Math.floor(displayScore).toLocaleString(), pad, topY + 20);
+
+      ctx.font = '700 11px sans-serif';
+      ctx.fillStyle = 'var(--text-sub)';
+      const meters = Math.floor(Needle.z / 10);
+      ctx.fillText(`${meters}m WEAVED`, pad, topY + 34);
+
+      // Streak Combo Pill
+      if (combo > 1) {
+        const pillX = pad + 115;
+        const pillY = topY + 4;
+        ctx.fillStyle = combo >= 5 ? 'rgba(255, 146, 43, 0.95)' : 'rgba(56, 217, 169, 0.85)';
+        ctx.beginPath();
+        ctx.roundRect(pillX, pillY, 78, 25, 12);
+        ctx.fill();
+
+        ctx.fillStyle = '#09090f';
+        ctx.font = '900 12px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${combo}X COMBO`, pillX + 39, pillY + 17);
+      }
+
+      // 2. Needles (Hearts) on Right
+      const rightX = W - pad;
+      ctx.textAlign = 'right';
+      for (let h = 0; h < 3; h++) {
+        const heartX = rightX - h * 24 - 10;
+        const heartY = topY + 14;
+        ctx.font = '16px sans-serif';
+        ctx.fillStyle = h < hearts ? '#ff6b8b' : 'rgba(255,255,255,0.2)';
+        ctx.fillText('🪡', heartX, heartY);
+      }
+
+      // Biome Name
+      const currentBiome = BIOMES[Math.floor(Needle.z / 3200) % BIOMES.length];
+      ctx.font = '700 11px sans-serif';
+      ctx.fillStyle = currentBiome.accent;
+      ctx.fillText(currentBiome.name.toUpperCase(), rightX, topY + 34);
+
+      // 3. Golden Thread / Frenzy Gauge Bar (Bottom Safe Margin)
+      const barW = Math.min(260, W - 80);
+      const barH = 8;
+      const barX = (W - barW) * 0.5;
+      const barY = H - safeBottom - 26;
+
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+      ctx.beginPath();
+      ctx.roundRect(barX, barY, barW, barH, 4);
+      ctx.fill();
+
+      const fillRatio = frenzyTimer > 0 ? frenzyTimer / 7.5 : goldenThreadGauge / 100;
+      ctx.fillStyle = frenzyTimer > 0 ? '#ffd43b' : 'var(--silk-rose)';
+      ctx.beginPath();
+      ctx.roundRect(barX, barY, barW * fillRatio, barH, 4);
+      ctx.fill();
+
+      ctx.font = '800 10px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = frenzyTimer > 0 ? '#ffd43b' : 'rgba(255,255,255,0.6)';
+      ctx.fillText(frenzyTimer > 0 ? '★ GOLDEN EMBROIDERY ACTIVE ★' : 'GOLDEN THREAD GAUGE', W * 0.5, barY - 6);
+
+      // 4. Onboarding Hint
+      if (onboardingActive) {
+        ctx.textAlign = 'center';
+        const boxW = Math.min(320, W - 40);
+        const boxH = 52;
+        const boxX = (W - boxW) * 0.5;
+        const boxY = H - safeBottom - 95;
+
+        ctx.fillStyle = 'var(--hud-panel)';
+        ctx.beginPath();
+        ctx.roundRect(boxX, boxY, boxW, boxH, 12);
+        ctx.fill();
+        ctx.strokeStyle = 'var(--silk-rose)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '700 13px sans-serif';
+        ctx.fillText('HOLD to Dive Underneath • RELEASE to Rise!', W * 0.5, boxY + 22);
+        ctx.font = '600 11px sans-serif';
+        ctx.fillStyle = 'var(--silk-gold)';
+        ctx.fillText('Thread buttons for combos • Dive under pins to dodge!', W * 0.5, boxY + 40);
+      }
+
+      ctx.restore();
+    }
+
+    // --- OVERLAYS: START SCREEN & GAMEOVER SCREEN ---
+    function drawStartScreen() {
+      ctx.save();
+      ctx.fillStyle = 'rgba(9, 9, 15, 0.88)';
+      ctx.fillRect(0, 0, W, H);
+
+      const cx = W * 0.5;
+      const cy = H * 0.44;
+
+      ctx.textAlign = 'center';
+      ctx.font = '900 38px sans-serif';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText('SILK', cx, cy - 65);
+      ctx.fillStyle = 'var(--silk-rose)';
+      ctx.fillText('WEAVER', cx, cy - 25);
+
+      ctx.font = '600 14px sans-serif';
+      ctx.fillStyle = '#94a3b8';
+      ctx.fillText('3D Precision Textile Seam Runner', cx, cy + 8);
+
+      // Instructions Panel
+      const badgeW = Math.min(340, W - 48);
+      ctx.fillStyle = 'rgba(24, 18, 38, 0.8)';
+      ctx.beginPath();
+      ctx.roundRect(cx - badgeW * 0.5, cy + 32, badgeW, 88, 14);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255, 107, 139, 0.25)';
+      ctx.stroke();
+
+      ctx.font = '700 13px sans-serif';
+      ctx.fillStyle = '#f8fafc';
+      ctx.fillText('1. DRAG to steer needle across the ribbon', cx, cy + 56);
+      ctx.fillText('2. HOLD screen to dive underneath fabric', cx, cy + 78);
+      ctx.fillStyle = 'var(--silk-gold)';
+      ctx.fillText('3. RELEASE to stitch up through button eyelets!', cx, cy + 100);
+
+      // Play prompt
+      const pulse = 1 + Math.sin(Date.now() * 0.006) * 0.05;
+      ctx.save();
+      ctx.translate(cx, cy + 165);
+      ctx.scale(pulse, pulse);
+      const btnW = 200;
+      const btnH = 48;
+      ctx.fillStyle = 'var(--silk-rose)';
+      ctx.beginPath();
+      ctx.roundRect(-btnW * 0.5, -btnH * 0.5, btnW, btnH, 24);
+      ctx.fill();
+
+      ctx.fillStyle = '#09090f';
+      ctx.font = '900 16px sans-serif';
+      ctx.fillText('START WEAVING', 0, 6);
+      ctx.restore();
+
+      const save = loadSaveData();
+      if (save.highScores[0] > 0) {
+        ctx.font = '700 13px sans-serif';
+        ctx.fillStyle = '#64748b';
+        ctx.fillText(`BEST SCORE: ${save.highScores[0].toLocaleString()}  •  MAX DISTANCE: ${save.maxMeters}m`, cx, cy + 225);
+      }
+
+      ctx.restore();
+    }
+
+    function drawGameOverScreen(dt) {
+      gameOverTimer += dt;
+      ctx.save();
+      ctx.fillStyle = 'rgba(9, 9, 15, 0.92)';
+      ctx.fillRect(0, 0, W, H);
+
+      const cx = W * 0.5;
+      const cy = H * 0.42;
+
+      ctx.textAlign = 'center';
+      ctx.font = '900 32px sans-serif';
+      ctx.fillStyle = '#ff4757';
+      ctx.fillText('SEAM SNAGGED', cx, cy - 90);
+
+      const panelW = Math.min(350, W - 40);
+      const panelH = 205;
+      ctx.fillStyle = 'rgba(18, 14, 28, 0.9)';
+      ctx.beginPath();
+      ctx.roundRect(cx - panelW * 0.5, cy - 70, panelW, panelH, 16);
+      ctx.fill();
+      ctx.strokeStyle = lastSaveResult && lastSaveResult.isHigh ? 'var(--silk-gold)' : 'var(--hud-border)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      if (lastSaveResult && lastSaveResult.isHigh) {
+        ctx.font = '900 12px sans-serif';
+        ctx.fillStyle = 'var(--silk-gold)';
+        ctx.fillText('★ NEW MASTER WEAVER RECORD! ★', cx, cy - 48);
+      }
+
+      ctx.font = '900 36px sans-serif';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(Math.floor(score).toLocaleString(), cx, cy - 10);
+
+      ctx.font = '700 12px sans-serif';
+      ctx.fillStyle = 'var(--text-sub)';
+      ctx.fillText('FINAL SCORE', cx, cy + 10);
+
+      const save = lastSaveResult ? lastSaveResult.data : loadSaveData();
+      ctx.font = '600 12px sans-serif';
+      ctx.fillStyle = '#cbd5e1';
+      ctx.fillText(`1st: ${save.highScores[0].toLocaleString()}    2nd: ${save.highScores[1].toLocaleString()}    3rd: ${save.highScores[2].toLocaleString()}`, cx, cy + 42);
+
+      ctx.font = '600 12px sans-serif';
+      ctx.fillStyle = '#64748b';
+      ctx.fillText(`Distance: ${Math.floor(Needle.z / 10)}m  •  Buttons: ${totalButtonsStitched}  •  Top Combo: ${save.maxCombo}x`, cx, cy + 64);
+
+      if (gameOverTimer > 0.8) {
+        const pulse = 1 + Math.sin(Date.now() * 0.007) * 0.04;
+        ctx.save();
+        ctx.translate(cx, cy + 165);
+        ctx.scale(pulse, pulse);
+        const btnW = 190;
+        const btnH = 46;
+        ctx.fillStyle = 'var(--silk-rose)';
+        ctx.beginPath();
+        ctx.roundRect(-btnW * 0.5, -btnH * 0.5, btnW, btnH, 23);
+        ctx.fill();
+
+        ctx.fillStyle = '#09090f';
+        ctx.font = '900 15px sans-serif';
+        ctx.fillText('THREAD AGAIN', 0, 5);
+        ctx.restore();
+      }
+
+      ctx.restore();
+    }
+
+    // --- MAIN ENGINE LOOP ---
+    function loop(timestamp) {
+      if (!lastTime) lastTime = timestamp;
+      let dt = (timestamp - lastTime) / 1000;
+      lastTime = timestamp;
+
+      dt = Math.min(0.04, Math.max(0.001, dt));
+      gameTime += dt;
+
+      // Screen shake decay
+      if (screenShake > 0) {
+        screenShake = Math.max(0, screenShake - dt * 28);
+      }
+
+      // Combo timer decay
+      if (comboTimer > 0) {
+        comboTimer = Math.max(0, comboTimer - dt);
+        if (comboTimer <= 0) combo = 0;
+      }
+
+      // Frenzy timer decay
+      if (frenzyTimer > 0) {
+        frenzyTimer = Math.max(0, frenzyTimer - dt);
+      }
+
+      // Canvas transform with camera shake
+      ctx.save();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      if (screenShake > 0) {
+        const sx = (Math.random() - 0.5) * screenShake;
+        const sy = (Math.random() - 0.5) * screenShake;
+        ctx.translate(sx, sy);
+      }
+
+      // Clear dark studio background
+      ctx.fillStyle = '#09090f';
+      ctx.fillRect(0, 0, W, H);
+
+      // Render 3D World
+      drawFabricRibbon();
+
+      if (gameState === STATES.PLAYING) {
+        WorldObjects.update(dt);
+        Needle.update(dt);
+        Particles.update(dt);
+        Popups.update(dt);
+
+        Stitches.draw();
+        WorldObjects.draw();
+        drawNeedle();
+        Particles.draw();
+        Popups.draw();
+
+        drawHUD();
+      } else if (gameState === STATES.START) {
+        drawNeedle();
+        drawStartScreen();
+      } else if (gameState === STATES.GAMEOVER) {
+        Stitches.draw();
+        WorldObjects.draw();
+        Particles.update(dt);
+        Popups.update(dt);
+        Particles.draw();
+        Popups.draw();
+        drawGameOverScreen(dt);
+      }
+
+      ctx.restore();
+      rAFId = requestAnimationFrame(loop);
+    }
+
+    function startLoop() {
+      if (rAFId) cancelAnimationFrame(rAFId);
+      lastTime = 0;
+      rAFId = requestAnimationFrame(loop);
+    }
+
+    function stopLoop() {
+      if (rAFId) {
+        cancelAnimationFrame(rAFId);
+        rAFId = null;
+      }
+    }
+
+    // Initialize state
+    Needle.reset();
+    WorldObjects.reset();
+    startLoop();
+
+  })();
+  </script>
+</body>
+</html>

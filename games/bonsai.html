@@ -1,0 +1,932 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bonsai Snip</title>
+<style>
+:root{--bg:#1c1613;--fg:#fbf4e8;--accent:#ffb703;--jade:#38b000;--danger:#ef476f}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#1c1613;--fg:#fbf4e8}}
+:root[data-theme="dark"]{--bg:#1c1613;--fg:#fbf4e8}
+html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;overscroll-behavior:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+canvas{position:fixed;inset:0;display:block;touch-action:none}
+#probe{position:fixed;top:0;left:0;visibility:hidden;padding-top:env(safe-area-inset-top,0px)}
+</style>
+</head>
+<body>
+<div id="probe"></div>
+<canvas id="c"></canvas>
+<script>
+(() => {
+'use strict';
+const STATES = { START: 0, PLAYING: 1, TREE_CLEAR: 2, GAMEOVER: 3 };
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), probe = document.getElementById('probe');
+const TAU = Math.PI * 2;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const rr = (a, b) => a + Math.random() * (b - a);
+function mb(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* ---------- storage ---------- */
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+};
+const loadTop = () => {
+  try {
+    const a = JSON.parse(store.get('bonsaisnip.top5') || '[]');
+    return Array.isArray(a) ? a.filter(n => typeof n === 'number' && isFinite(n)).slice(0, 5) : [];
+  } catch (e) { return []; }
+};
+let top5 = loadTop();
+let bestTrees = parseInt(store.get('bonsaisnip.trees') || '0', 10) || 0;
+let bestStreak = parseInt(store.get('bonsaisnip.streak') || '0', 10) || 0;
+function saveScore(sc, tr, st) {
+  const s = Math.floor(sc);
+  const a = top5.slice(); a.push(s); a.sort((x, y) => y - x); top5 = a.slice(0, 5);
+  store.set('bonsaisnip.top5', JSON.stringify(top5));
+  if (tr > bestTrees) { bestTrees = tr; store.set('bonsaisnip.trees', String(bestTrees)); }
+  if (st > bestStreak) { bestStreak = st; store.set('bonsaisnip.streak', String(bestStreak)); }
+  return s > 0 ? top5.indexOf(s) : -1;
+}
+
+/* ---------- canvas & responsive garden layout ---------- */
+let W = 360, H = 640, dpr = 1, safeTop = 0, S = 1, OX = 180, OY = 460;
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 3);
+  W = window.innerWidth || 360;
+  H = window.innerHeight || 640;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  cv.style.width = W + 'px';
+  cv.style.height = H + 'px';
+  safeTop = probe.offsetHeight || 0;
+  const topPad = safeTop + Math.min(64, H * 0.13);
+  const botPad = Math.min(54, H * 0.11);
+  const availW = W - 20;
+  const availH = Math.max(140, H - topPad - botPad);
+  S = Math.min(availW / 350, availH / 410);
+  OX = W * 0.5;
+  OY = topPad + availH * 0.78;
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 120));
+
+const P = (wx, wy) => ({ x: OX + wx * S, y: OY + wy * S });
+const unP = (sx, sy) => ({ x: (sx - OX) / S, y: (sy - OY) / S });
+
+/* ---------- audio engine ---------- */
+let AC = null, noiseBuf = null;
+function audio() {
+  if (!AC) {
+    try {
+      const C = window.AudioContext || window.webkitAudioContext;
+      if (C) {
+        AC = new C();
+        noiseBuf = AC.createBuffer(1, AC.sampleRate, AC.sampleRate);
+        const d = noiseBuf.getChannelData(0);
+        for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+      }
+    } catch (e) { AC = null; }
+  }
+  if (AC && AC.state === 'suspended') AC.resume();
+  return AC;
+}
+function tone(type, f0, f1, dur, vol, delay = 0) {
+  const a = audio(); if (!a) return;
+  try {
+    const o = a.createOscillator(), g = a.createGain(), t = a.currentTime + delay;
+    o.type = type; o.frequency.setValueAtTime(f0, t);
+    o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(a.destination);
+    o.start(t); o.stop(t + dur + 0.03);
+  } catch (e) {}
+}
+function noise(dur, vol, freq, type = 'highpass') {
+  const a = audio(); if (!a || !noiseBuf) return;
+  try {
+    const s = a.createBufferSource(), f = AC.createBiquadFilter(), g = a.createGain(), t = a.currentTime;
+    s.buffer = noiseBuf; f.type = type; f.frequency.value = freq;
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    s.connect(f); f.connect(g); g.connect(a.destination);
+    s.start(t); s.stop(t + dur + 0.02);
+  } catch (e) {}
+}
+const sfx = {
+  snip(streak, multi) {
+    noise(0.06, 0.2, 3400, 'highpass');
+    const base = 523.25 * Math.pow(1.0595, Math.min(streak, 15));
+    tone('triangle', base, base * 1.45, 0.14, 0.16);
+    if (multi > 1) tone('sine', base * 1.5, base * 2.0, 0.22, 0.13, 0.04);
+  },
+  bloom() {
+    [523.25, 659.25, 783.99, 1046.5, 1318.5].forEach((f, i) => tone('sine', f, f * 1.01, 0.36, 0.13, i * 0.06));
+  },
+  mistake() {
+    noise(0.25, 0.28, 700, 'bandpass');
+    tone('sawtooth', 220, 65, 0.32, 0.2);
+  },
+  undo() { tone('sine', 440, 330, 0.09, 0.09); },
+  start() { tone('triangle', 392, 784, 0.15, 0.12); },
+  over() { tone('sawtooth', 310, 42, 0.8, 0.16); }
+};
+
+/* ---------- geometry & procedural bonsai generator ---------- */
+const STYLES = [
+  { name: 'KYOTO SAKURA', leafCol: '#ff8fab', flowerCol: '#ffb3c6', potCol: '#3d5a80' },
+  { name: 'AUTUMN MOMIJI', leafCol: '#f77f00', flowerCol: '#fcbf49', potCol: '#5f0f40' },
+  { name: 'IMPERIAL PINE', leafCol: '#52b788', flowerCol: '#ffd166', potCol: '#7f5539' },
+  { name: 'WISTERIA CLOUD', leafCol: '#b5179e', flowerCol: '#f72585', potCol: '#2b2d42' }
+];
+
+function segIntersect(ax, ay, bx, by, cx, cy, dx, dy) {
+  const ccw = (x1, y1, x2, y2, x3, y3) => (y3 - y1) * (x2 - x1) > (y2 - y1) * (x3 - x1);
+  return (ccw(ax, ay, cx, cy, dx, dy) !== ccw(bx, by, cx, cy, dx, dy)) &&
+         (ccw(ax, ay, bx, by, cx, cy) !== ccw(ax, ay, bx, by, dx, dy));
+}
+
+function inCanopy(wx, wy, domes) {
+  for (const d of domes) {
+    const nx = (wx - d.x) / d.rx;
+    const ny = (wy - d.y) / d.ry;
+    if (nx * nx + ny * ny <= 1.0) return true;
+  }
+  return false;
+}
+
+function buildBonsai(treeIdx) {
+  const rnd = mb(8821 + treeIdx * 313);
+  const style = STYLES[treeIdx % STYLES.length];
+
+  // Define Zen Cloud Canopy Domes (1 large or 2-3 tiered domes)
+  const domes = [];
+  if (treeIdx % 3 === 0) {
+    domes.push({ x: 0, y: -165, rx: 108, ry: 68 });
+  } else if (treeIdx % 3 === 1) {
+    domes.push({ x: -45, y: -145, rx: 74, ry: 48 });
+    domes.push({ x:  42, y: -182, rx: 78, ry: 50 });
+  } else {
+    domes.push({ x: -54, y: -135, rx: 64, ry: 42 });
+    domes.push({ x:  54, y: -150, rx: 64, ry: 42 });
+    domes.push({ x:   0, y: -202, rx: 76, ry: 46 });
+  }
+
+  const branches = [];
+  function addBranch(parent, x1, y1, ang, len, thick, depth, forceWeed) {
+    const x2 = x1 + Math.cos(ang) * len;
+    const y2 = y1 + Math.sin(ang) * len;
+    const inside = inCanopy(x2, y2, domes);
+    const b = {
+      id: branches.length,
+      parent,
+      children: [],
+      x1, y1, x2, y2,
+      thick, depth,
+      trunk: depth === 0,
+      inside,
+      weed: false,
+      lotus: false,
+      blossom: false,
+      alive: true
+    };
+    branches.push(b);
+    if (parent !== null) branches[parent].children.push(b.id);
+    return b;
+  }
+
+  // Trunk base & primary boughs (always inside/structural)
+  const root = addBranch(null, 0, -28, -Math.PI * 0.5 + (rnd() - 0.5) * 0.14, 58, 17, 0);
+  const b1 = addBranch(root.id, root.x2, root.y2, -Math.PI * 0.5 - 0.45 + (rnd() - 0.5) * 0.12, 54, 12, 1);
+  const b2 = addBranch(root.id, root.x2, root.y2, -Math.PI * 0.5 + 0.44 + (rnd() - 0.5) * 0.12, 54, 12, 1);
+  const b3 = addBranch(root.id, root.x2, root.y2, -Math.PI * 0.5 + (rnd() - 0.5) * 0.16, 58, 11, 1);
+
+  const tier1 = [b1, b2, b3];
+  const tier2 = [];
+  for (const p of tier1) {
+    for (let s = -1; s <= 1; s += 2) {
+      const ang = Math.atan2(p.y2 - p.y1, p.x2 - p.x1) + s * (0.36 + rnd() * 0.22);
+      const len = 42 + rnd() * 14;
+      const ch = addBranch(p.id, p.x2, p.y2, ang, len, 7.5, 2);
+      // Ensure tier2 stays inside the canopy so inner twigs are healthy
+      ch.inside = true;
+      ch.blossom = true;
+      tier2.push(ch);
+    }
+  }
+
+  // Now sprout wild overgrown weed shoots that poke OUTSIDE the Zen Cloud Canopy!
+  // Also sprout some inner blossom twigs & Golden Lotus Buds inside the canopy.
+  let weedRoots = 0;
+  for (let i = 0; i < tier2.length; i++) {
+    const p = tier2[i];
+    const baseAng = Math.atan2(p.y2 - p.y1, p.x2 - p.x1);
+
+    // 1. Outward wild weed shoot (juts clearly outside the dome!)
+    const outAng = Math.atan2(p.y2 - (-160), p.x2 - 0) + (rnd() - 0.5) * 0.35;
+    const wLen = 58 + rnd() * 24;
+    const w1 = addBranch(p.id, p.x2, p.y2, outAng, wLen, 5, 3);
+    if (!inCanopy(w1.x2, w1.y2, domes)) {
+      w1.weed = true;
+      w1.inside = false;
+      weedRoots++;
+      // Add a secondary forked weed tip so slicing the base stem snips both in 1 cut!
+      if (rnd() < 0.65) {
+        const w2 = addBranch(w1.id, w1.x2, w1.y2, outAng + (rnd() < 0.5 ? 0.4 : -0.4), 34, 3.5, 4);
+        w2.weed = true;
+        w2.inside = false;
+      }
+    } else {
+      w1.blossom = true;
+    }
+
+    // 2. Inner Golden Lotus Bud twig (sits just inside the canopy border—do NOT snip!)
+    if (i % 2 === 0) {
+      const inAng = baseAng + (rnd() - 0.5) * 0.5;
+      const gTwig = addBranch(p.id, p.x2, p.y2, inAng, 26, 4.5, 3);
+      if (inCanopy(gTwig.x2, gTwig.y2, domes)) {
+        gTwig.inside = true;
+        gTwig.lotus = true;
+      } else {
+        gTwig.weed = true;
+        w1.inside = false;
+      }
+    }
+  }
+
+  // Guarantee at least 4 wild weed shoots
+  if (weedRoots < 3) {
+    const topB = addBranch(b3.id, b3.x2, b3.y2, -Math.PI * 0.5, 95, 5, 3);
+    topB.weed = true; topB.inside = false;
+    weedRoots++;
+  }
+
+  const par = weedRoots;
+  const extra = Math.max(2, 4 - Math.floor(treeIdx / 3));
+  return {
+    style, domes, branches,
+    par,
+    shears: par + extra,
+    maxShears: par + extra
+  };
+}
+
+/* ---------- game state ---------- */
+let state = STATES.START, G = null, raf = 0, last = 0, overAt = 0, ui = [];
+const slice = { id: null, on: false, x1: 0, y1: 0, x2: 0, y2: 0 };
+const petals = Array.from({ length: 28 }, () => ({ x: Math.random(), y: Math.random(), r: rr(2, 4.5), vx: rr(-0.02, 0.02), vy: rr(0.02, 0.05), a: rr(0, TAU) }));
+
+function loadTree(idx) {
+  const g = G, T = buildBonsai(idx);
+  g.treeIdx = idx;
+  g.style = T.style;
+  g.domes = T.domes;
+  g.branches = T.branches;
+  g.par = T.par;
+  g.shears = T.shears;
+  g.maxShears = T.maxShears;
+  g.cutsUsed = 0;
+  g.hist = [];
+  g.bloomed = false;
+  g.clearT = 0;
+}
+
+function resetGame() {
+  G = {
+    t: 0, treeIdx: 0, score: 0, lives: 3, streak: 0, maxStreak: 0, treesCleared: 0,
+    style: STYLES[0], domes: [], branches: [],
+    par: 4, shears: 6, maxShears: 6, cutsUsed: 0,
+    hist: [], falling: [], parts: [], pops: [],
+    bloomed: false, clearT: 0,
+    shake: 0, slowmo: 1, flash: 0, hint: 1,
+    rank: -1, hiNew: false, reason: '', saved: false
+  };
+  loadTree(0);
+}
+
+/* ---------- loop control ---------- */
+function stopLoop() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+function startLoop() { stopLoop(); last = performance.now(); raf = requestAnimationFrame(frame); }
+function frame(now) {
+  raf = requestAnimationFrame(frame);
+  const rawDt = Math.min(0.033, Math.max(0.001, (now - last) / 1000));
+  last = now;
+  update(rawDt * (G ? G.slowmo : 1), rawDt);
+  draw(now);
+}
+document.addEventListener('visibilitychange', () => {
+  slice.on = false; slice.id = null;
+  document.hidden ? stopLoop() : startLoop();
+});
+window.addEventListener('blur', () => { slice.on = false; slice.id = null; });
+
+function startGame() {
+  stopLoop();
+  slice.on = false; slice.id = null;
+  resetGame();
+  state = STATES.PLAYING;
+  sfx.start();
+  startLoop();
+}
+
+/* ---------- helpers & juice ---------- */
+const mult = () => 1 + Math.min(G.streak, 15) * 0.25;
+function pop(t, col, wx, wy, sz = 19) {
+  const s = P(wx, wy);
+  G.pops.push({ t, col, x: s.x, y: s.y, sz, l: 1.15 });
+}
+function burst(wx, wy, n, cols, sp = 170) {
+  const s = P(wx, wy);
+  for (let i = 0; i < n && G.parts.length < 240; i++) {
+    const a = Math.random() * TAU, v = sp * rr(0.35, 1.15);
+    G.parts.push({ x: s.x, y: s.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 40, l: rr(0.4, 0.85), m: 0.85, c: cols[i % cols.length], r: rr(2.5, 5) });
+  }
+}
+
+function collectSubtree(bId, outList) {
+  const b = G.branches[bId];
+  if (!b || !b.alive) return;
+  outList.push(b);
+  for (const chId of b.children) collectSubtree(chId, outList);
+}
+
+function undoCut() {
+  const g = G;
+  if (state !== STATES.PLAYING || !g.hist.length) return;
+  const lastSnap = g.hist.pop();
+  for (const id of lastSnap.ids) {
+    g.branches[id].alive = true;
+  }
+  g.shears++;
+  g.cutsUsed = Math.max(0, g.cutsUsed - 1);
+  sfx.undo();
+}
+
+function performSlice(wx1, wy1, wx2, wy2) {
+  const g = G;
+  if (state !== STATES.PLAYING || g.shears <= 0) return;
+
+  // Find all alive branches intersected by the player's blade stroke
+  const hitRoots = [];
+  for (const b of g.branches) {
+    if (!b.alive) continue;
+    if (segIntersect(wx1, wy1, wx2, wy2, b.x1, b.y1, b.x2, b.y2)) {
+      hitRoots.push(b);
+    }
+  }
+  if (!hitRoots.length) return;
+
+  // Collect full subtrees that will fall from this snip
+  const severedSet = new Set();
+  for (const r of hitRoots) {
+    const sub = [];
+    collectSubtree(r.id, sub);
+    for (const sb of sub) severedSet.add(sb);
+  }
+  const severed = Array.from(severedSet);
+
+  // Check if player sliced the main trunk or healthy inner blossom/lotus branches!
+  const hitTrunk = severed.some(b => b.trunk || b.depth <= 1);
+  const hitLotus = severed.some(b => b.lotus);
+  const hitHealthy = severed.some(b => !b.weed);
+
+  if (hitTrunk || hitLotus || hitHealthy) {
+    g.lives--;
+    g.streak = 0;
+    g.shake = 15;
+    g.flash = 0.65;
+    sfx.mistake();
+    const midX = (wx1 + wx2) * 0.5, midY = (wy1 + wy2) * 0.5;
+    const msg = hitTrunk ? 'SLICED MAIN TRUNK!' : hitLotus ? 'CUT GOLDEN LOTUS!' : 'PRUNED INNER CANOPY!';
+    pop(msg, '#ef476f', midX, midY, 21);
+    burst(midX, midY, 22, ['#ef476f', '#ffb703', '#ffffff'], 200);
+    if (g.lives <= 0) {
+      g.reason = msg;
+      endGame();
+    }
+    return;
+  }
+
+  // Clean Weed Prune!
+  g.hist.push({ ids: severed.map(b => b.id) });
+  g.shears--;
+  g.cutsUsed++;
+  g.hint = 0;
+
+  for (const b of severed) {
+    b.alive = false;
+    g.falling.push({
+      x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2,
+      thick: b.thick,
+      vx: rr(-45, 45), vy: rr(-50, -10),
+      vRot: rr(-2.5, 2.5), rot: 0,
+      l: 0.9
+    });
+    burst(b.x2, b.y2, 8, ['#8ac926', '#d9ed92', '#ffffff'], 130);
+  }
+
+  g.streak++;
+  g.maxStreak = Math.max(g.maxStreak, g.streak);
+  const nCut = severed.length;
+  const pts = Math.round(60 * nCut * (nCut > 1 ? 1.5 : 1) * mult());
+  g.score += pts;
+  sfx.snip(g.streak, nCut);
+  g.shake = 5 + nCut * 2;
+
+  const midX = (wx1 + wx2) * 0.5, midY = (wy1 + wy2) * 0.5;
+  pop((nCut > 1 ? `${nCut}x MULTI-SNIP! +` : 'CLEAN SNIP! +') + pts, nCut > 1 ? '#ffb703' : '#38b000', midX, midY, nCut > 1 ? 21 : 18);
+
+  // Check if all wild weeds are pruned!
+  const weedsLeft = g.branches.filter(b => b.alive && b.weed).length;
+  if (weedsLeft === 0) {
+    completeTree();
+  } else if (g.shears <= 0) {
+    // Out of shears with weeds remaining: refund 1 shear at the cost of 1 life
+    g.lives--;
+    g.streak = 0;
+    g.shake = 12;
+    sfx.mistake();
+    if (g.lives <= 0) {
+      g.reason = 'OUT OF SHEARS!';
+      endGame();
+    } else {
+      g.shears = 2;
+      pop('OUT OF SHEARS! -1 LIFE (+2 SNIPS)', '#ef476f', 0, -160, 19);
+    }
+  }
+}
+
+function completeTree() {
+  const g = G;
+  g.bloomed = true;
+  g.treesCleared++;
+  const lotusAlive = g.branches.filter(b => b.alive && b.lotus).length;
+  const parBonus = g.cutsUsed <= g.par ? 250 : 0;
+  const bonus = Math.round((300 + g.treeIdx * 120 + lotusAlive * 150 + g.shears * 60 + parBonus) * mult());
+  g.score += bonus;
+  g.lastBonus = bonus;
+  g.lastPar = g.cutsUsed <= g.par;
+
+  sfx.bloom();
+  g.slowmo = 0.42;
+  for (const b of g.branches) {
+    if (b.alive && (b.blossom || b.lotus)) {
+      burst(b.x2, b.y2, 10, [g.style.flowerCol, '#ffb703', '#ffffff'], 160);
+    }
+  }
+  pop((g.lastPar ? 'ZEN MASTER PAR! +' : 'FULL BLOOM! +') + bonus, '#ffb703', 0, -185, 23);
+  if (g.treesCleared > bestTrees) { bestTrees = g.treesCleared; store.set('bonsaisnip.trees', String(bestTrees)); }
+
+  state = STATES.TREE_CLEAR;
+  g.clearT = 2.0;
+}
+
+function endGame() {
+  if (G.saved) return;
+  G.saved = true;
+  state = STATES.GAMEOVER;
+  overAt = performance.now();
+  const prior = top5[0] || 0;
+  G.rank = saveScore(G.score, G.treesCleared, G.maxStreak);
+  G.hiNew = G.score > prior && G.score > 0;
+  sfx.over();
+}
+
+/* ---------- update ---------- */
+function update(dt, rawDt) {
+  const g = G;
+  g.t += dt;
+  g.shake *= Math.exp(-8 * rawDt);
+  g.flash = Math.max(0, g.flash - rawDt * 2.5);
+  g.slowmo += (1 - g.slowmo) * Math.min(1, rawDt * 5);
+
+  for (const pt of petals) {
+    pt.x += pt.vx * rawDt;
+    pt.y += pt.vy * rawDt;
+    pt.a += rawDt * 1.5;
+    if (pt.y > 1.05) { pt.y = -0.05; pt.x = Math.random(); }
+    if (pt.x < -0.05) pt.x = 1.05;
+    if (pt.x > 1.05) pt.x = -0.05;
+  }
+  for (let i = g.parts.length - 1; i >= 0; i--) {
+    const p = g.parts[i]; p.l -= rawDt;
+    if (p.l <= 0) { g.parts.splice(i, 1); continue; }
+    p.vy += 360 * rawDt; p.x += p.vx * rawDt; p.y += p.vy * rawDt;
+  }
+  for (let i = g.falling.length - 1; i >= 0; i--) {
+    const f = g.falling[i]; f.l -= rawDt;
+    if (f.l <= 0) { g.falling.splice(i, 1); continue; }
+    f.vy += 480 * rawDt;
+    f.x1 += f.vx * rawDt; f.x2 += f.vx * rawDt;
+    f.y1 += f.vy * rawDt; f.y2 += f.vy * rawDt;
+  }
+  for (let i = g.pops.length - 1; i >= 0; i--) {
+    const p = g.pops[i]; p.l -= rawDt;
+    if (p.l <= 0) g.pops.splice(i, 1); else p.y -= 28 * rawDt;
+  }
+
+  if (state === STATES.TREE_CLEAR) {
+    g.clearT -= rawDt;
+    if (g.clearT <= 0) {
+      loadTree(g.treeIdx + 1);
+      state = STATES.PLAYING;
+    }
+  }
+}
+
+/* ---------- UI buttons & input ---------- */
+function undoBtnGeo() {
+  const bw = Math.min(140, W * 0.38), bh = Math.min(42, Math.max(34, H * 0.07));
+  return { x: OX - bw * 0.5, y: H - bh - 10, w: bw, h: bh };
+}
+function inUndoBtn(x, y) {
+  const b = undoBtnGeo();
+  return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+}
+
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault(); audio();
+  try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+  if (state === STATES.START) { startGame(); return; }
+  if (state === STATES.GAMEOVER) { if (performance.now() - overAt > 800) startGame(); return; }
+  if (state !== STATES.PLAYING) return;
+
+  if (inUndoBtn(e.clientX, e.clientY)) {
+    undoCut();
+    return;
+  }
+
+  if (slice.id === null) {
+    slice.id = e.pointerId;
+    slice.on = true;
+    slice.x1 = slice.x2 = e.clientX;
+    slice.y1 = slice.y2 = e.clientY;
+  }
+});
+
+cv.addEventListener('pointermove', e => {
+  if (e.pointerId === slice.id && slice.on) {
+    slice.x2 = e.clientX;
+    slice.y2 = e.clientY;
+  }
+});
+
+function onUp(e) {
+  if (e.pointerId !== slice.id) return;
+  const sx1 = slice.x1, sy1 = slice.y1, sx2 = slice.x2, sy2 = slice.y2;
+  slice.id = null;
+  slice.on = false;
+  if (state === STATES.PLAYING && Math.hypot(sx2 - sx1, sy2 - sy1) > 12) {
+    const a = unP(sx1, sy1), b = unP(sx2, sy2);
+    performSlice(a.x, a.y, b.x, b.y);
+  }
+}
+cv.addEventListener('pointerup', onUp);
+cv.addEventListener('pointercancel', () => { slice.id = null; slice.on = false; });
+cv.addEventListener('contextmenu', e => e.preventDefault());
+
+window.addEventListener('keydown', e => {
+  if (e.repeat) return;
+  const c = e.code;
+  if (c === 'KeyZ' || c === 'KeyU') {
+    e.preventDefault(); undoCut();
+  } else if (c === 'Space' || c === 'Enter') {
+    e.preventDefault(); audio();
+    if (state === STATES.START) startGame();
+    else if (state === STATES.GAMEOVER && performance.now() - overAt > 800) startGame();
+  }
+});
+
+/* ---------- rendering ---------- */
+function rrect(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function txt(s, x, y, sz, col, align = 'center', maxW = 0, weight = 800) {
+  let f = Math.max(8, sz);
+  ctx.font = weight + ' ' + f + 'px system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
+  if (maxW > 0) {
+    while (f > 9 && ctx.measureText(s).width > maxW) {
+      f--;
+      ctx.font = weight + ' ' + f + 'px system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
+    }
+  }
+  ctx.fillStyle = col; ctx.textAlign = align; ctx.textBaseline = 'middle';
+  ctx.fillText(s, x, y);
+}
+
+function drawZenGarden(now) {
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#291f1a');
+  bg.addColorStop(0.6, '#1c1512');
+  bg.addColorStop(1, '#120d0b');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+  // Warm Shoji Paper Moon Backdrop behind the Bonsai
+  const moonCenter = P(0, -165);
+  const moonR = Math.max(30, 142 * S);
+  const mg = ctx.createRadialGradient(moonCenter.x, moonCenter.y, 5, moonCenter.x, moonCenter.y, moonR);
+  mg.addColorStop(0, 'rgba(255, 243, 214, 0.24)');
+  mg.addColorStop(0.7, 'rgba(255, 210, 140, 0.08)');
+  mg.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = mg;
+  ctx.beginPath(); ctx.arc(moonCenter.x, moonCenter.y, moonR, 0, TAU); ctx.fill();
+
+  // Floating Sakura Petals
+  for (const pt of petals) {
+    ctx.save();
+    ctx.translate(pt.x * W, pt.y * H);
+    ctx.rotate(pt.a);
+    ctx.fillStyle = 'rgba(255, 179, 198, 0.35)';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, pt.r, pt.r * 0.55, 0, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Wooden Display Stand & Glazed Ceramic Bonsai Pot
+  const potTop = P(0, -28), potW = 112 * S, potH = 42 * S;
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.beginPath();
+  ctx.ellipse(potTop.x, potTop.y + potH + 10 * S, potW * 0.62, 10 * S, 0, 0, TAU);
+  ctx.fill();
+
+  // Rosewood stand feet
+  ctx.fillStyle = '#3b1f12';
+  rrect(potTop.x - potW * 0.52, potTop.y + potH - 2 * S, potW * 1.04, 10 * S, 3 * S);
+  ctx.fill();
+
+  // Glazed ceramic pot trapezoid
+  ctx.fillStyle = G.style.potCol;
+  ctx.beginPath();
+  ctx.moveTo(potTop.x - potW * 0.55, potTop.y);
+  ctx.lineTo(potTop.x + potW * 0.55, potTop.y);
+  ctx.lineTo(potTop.x + potW * 0.44, potTop.y + potH);
+  ctx.lineTo(potTop.x - potW * 0.44, potTop.y + potH);
+  ctx.closePath();
+  ctx.fill();
+
+  // Pot rim & green moss mound
+  ctx.fillStyle = '#52b788';
+  ctx.beginPath();
+  ctx.ellipse(potTop.x, potTop.y, potW * 0.5, 8 * S, 0, Math.PI, 0);
+  ctx.fill();
+
+  ctx.fillStyle = 'rgba(255,255,255,0.22)';
+  rrect(potTop.x - potW * 0.58, potTop.y - 4 * S, potW * 1.16, 7 * S, 3 * S);
+  ctx.fill();
+}
+
+function drawTreeAndCanopy(now) {
+  const g = G;
+
+  // 1. Zen Cloud Canopy Silhouette (Dotted Target Guide)
+  ctx.save();
+  for (const d of g.domes) {
+    const c = P(d.x, d.y);
+    ctx.fillStyle = g.bloomed ? 'rgba(255, 183, 3, 0.14)' : 'rgba(82, 183, 136, 0.09)';
+    ctx.strokeStyle = g.bloomed ? '#ffb703' : 'rgba(251, 244, 232, 0.72)';
+    ctx.lineWidth = 2 * S;
+    ctx.setLineDash([6 * S, 5 * S]);
+    ctx.beginPath();
+    ctx.ellipse(c.x, c.y, d.rx * S, d.ry * S, 0, 0, TAU);
+    ctx.fill(); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.restore();
+
+  // Preview which branches will be severed if player releases current drag!
+  const previewIds = new Set();
+  let previewBad = false;
+  if (slice.on && Math.hypot(slice.x2 - slice.x1, slice.y2 - slice.y1) > 12) {
+    const a = unP(slice.x1, slice.y1), b = unP(slice.x2, slice.y2);
+    for (const br of g.branches) {
+      if (!br.alive) continue;
+      if (segIntersect(a.x, a.y, b.x, b.y, br.x1, br.y1, br.x2, br.y2)) {
+        const sub = [];
+        collectSubtree(br.id, sub);
+        for (const sb of sub) {
+          previewIds.add(sb.id);
+          if (!sb.weed) previewBad = true;
+        }
+      }
+    }
+  }
+
+  // 2. Draw Living Bark Branches
+  for (const b of g.branches) {
+    if (!b.alive) continue;
+    const p1 = P(b.x1, b.y1), p2 = P(b.x2, b.y2);
+    const inPrev = previewIds.has(b.id);
+
+    ctx.lineCap = 'round';
+    ctx.lineWidth = Math.max(2, b.thick * S);
+    if (inPrev) {
+      ctx.strokeStyle = previewBad ? '#ef476f' : '#ffb703';
+    } else if (b.weed) {
+      // Overgrown thorny weed shoot outside the dome
+      ctx.strokeStyle = '#6b9040';
+    } else {
+      ctx.strokeStyle = '#5c3a21';
+    }
+    ctx.beginPath();
+    ctx.moveTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.stroke();
+
+    // Specular bark highlight
+    ctx.lineWidth = Math.max(1, b.thick * 0.3 * S);
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.stroke();
+
+    // Draw Thorny Weed Leaves on shoots jutting outside the dome!
+    if (b.weed) {
+      const mx = (p1.x + p2.x) * 0.5, my = (p1.y + p2.y) * 0.5;
+      ctx.fillStyle = inPrev ? '#ffb703' : '#8ac926';
+      ctx.beginPath();
+      ctx.arc(p2.x, p2.y, 6.5 * S, 0, TAU);
+      ctx.arc(mx, my, 4.5 * S, 0, TAU);
+      ctx.fill();
+      txt('✂', p2.x, p2.y - 10 * S, Math.max(9, 10 * S), '#ffb703', 'center', 0, 900);
+    }
+
+    // Draw Healthy Inner Blossom Clusters & Golden Lotus Buds inside the canopy!
+    if (b.blossom && !b.weed) {
+      const r = (g.bloomed ? 15 : 10) * S;
+      ctx.fillStyle = g.bloomed ? g.style.flowerCol : g.style.leafCol;
+      ctx.beginPath();
+      ctx.arc(p2.x, p2.y, r, 0, TAU);
+      ctx.arc(p2.x - r * 0.6, p2.y + r * 0.2, r * 0.75, 0, TAU);
+      ctx.arc(p2.x + r * 0.6, p2.y + r * 0.2, r * 0.75, 0, TAU);
+      ctx.fill();
+    }
+
+    if (b.lotus) {
+      const pulse = 1 + 0.14 * Math.sin(now * 0.008 + b.id);
+      const r = 8 * S * pulse;
+      ctx.fillStyle = '#ffb703';
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.5 * S;
+      ctx.beginPath();
+      ctx.arc(p2.x, p2.y, r, 0, TAU);
+      ctx.fill(); ctx.stroke();
+    }
+  }
+
+  // 3. Falling Severed Twigs
+  for (const f of g.falling) {
+    const p1 = P(f.x1, f.y1), p2 = P(f.x2, f.y2);
+    ctx.globalAlpha = clamp(f.l, 0, 1);
+    ctx.strokeStyle = '#6b9040';
+    ctx.lineWidth = Math.max(2, f.thick * S);
+    ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  // 4. Active Pruning Shear Slice Line
+  if (slice.on) {
+    ctx.save();
+    ctx.strokeStyle = previewBad ? '#ef476f' : '#ffb703';
+    ctx.lineWidth = 3 * S;
+    ctx.setLineDash([5 * S, 4 * S]);
+    ctx.beginPath();
+    ctx.moveTo(slice.x1, slice.y1);
+    ctx.lineTo(slice.x2, slice.y2);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function panel(x, y, w, h) {
+  rrect(x, y, w, h, 12);
+  ctx.fillStyle = 'rgba(22, 16, 13, 0.88)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255, 183, 3, 0.32)'; ctx.lineWidth = 1.5; ctx.stroke();
+}
+
+function drawHUD(now) {
+  const g = G, pad = 10, topY = safeTop + 6, ph = Math.min(48, H * 0.11);
+  const w1 = Math.min(135, W * 0.3), w2 = Math.min(130, W * 0.28), w3 = Math.min(130, W * 0.28);
+
+  panel(pad, topY, w1, ph);
+  txt('HARMONY', pad + w1 * 0.5, topY + ph * 0.28, 10, '#d6c2b2', 'center', w1 - 10, 700);
+  txt(String(Math.floor(g.score)), pad + w1 * 0.5, topY + ph * 0.68, Math.min(20, ph * 0.44), '#fff', 'center', w1 - 12, 900);
+
+  const x2 = W * 0.5 - w2 * 0.5;
+  panel(x2, topY, w2, ph);
+  txt('SNIPS ' + g.shears, W * 0.5, topY + ph * 0.35, Math.min(15, ph * 0.36), g.shears <= 1 ? '#ef476f' : '#ffb703', 'center', w2 - 8, 900);
+  txt('PAR ' + g.par + '  •  TREE ' + (g.treeIdx + 1), W * 0.5, topY + ph * 0.74, 9.5, '#e6ccb2', 'center', w2 - 8, 700);
+
+  const x3 = W - pad - w3;
+  panel(x3, topY, w3, ph);
+  for (let i = 0; i < 3; i++) {
+    const hx = x3 + w3 * (0.22 + i * 0.28), hy = topY + ph * 0.5, r = Math.min(7, w3 / 12);
+    ctx.fillStyle = i < g.lives ? '#38b000' : 'rgba(255,255,255,0.16)';
+    ctx.beginPath(); ctx.arc(hx, hy, r, 0, TAU); ctx.fill();
+  }
+
+  // Bottom UNDO Button
+  if (state === STATES.PLAYING) {
+    const ub = undoBtnGeo();
+    const canUndo = g.hist.length > 0;
+    rrect(ub.x, ub.y, ub.w, ub.h, 10);
+    ctx.fillStyle = canUndo ? '#ffb703' : 'rgba(255,255,255,0.1)';
+    ctx.fill();
+    txt('UNDO SNIP (Z)', ub.x + ub.w * 0.5, ub.y + ub.h * 0.5, Math.min(13, ub.h * 0.35), canUndo ? '#1c1613' : '#8d7b6d', 'center', ub.w - 12, 900);
+  }
+
+  if (state === STATES.PLAYING && g.hint > 0) {
+    const ub = undoBtnGeo();
+    const hw = Math.min(330, W * 0.92), hy = ub.y - 24;
+    panel(W * 0.5 - hw * 0.5, hy - 18, hw, 36);
+    txt('SWIPE across green ✂ weed shoots outside the dotted dome!', W * 0.5, hy, 11.5, '#fff', 'center', hw - 14, 800);
+  }
+}
+
+function drawStart(now) {
+  ctx.fillStyle = 'rgba(18, 13, 11, 0.74)'; ctx.fillRect(0, 0, W, H);
+  const titleSz = Math.min(48, W / 7, H * 0.13);
+  txt('BONSAI SNIP', W * 0.5, H * 0.25, titleSz, '#ffb703', 'center', W - 28, 900);
+  txt('Swipe to prune wild shoots outside the Zen canopy', W * 0.5, H * 0.41, Math.min(14, W / 24, H * 0.045), '#fbf4e8', 'center', W - 28, 600);
+  txt('Protect inner blossoms & gold lotus buds • No timer!', W * 0.5, H * 0.49, Math.min(13, W / 26, H * 0.04), '#52b788', 'center', W - 28, 700);
+  ctx.globalAlpha = 0.65 + 0.35 * Math.sin(now * 0.006);
+  txt('TAP / CLICK TO PRUNE', W * 0.5, H * 0.66, Math.min(24, W / 13, H * 0.07), '#38b000', 'center', W - 28, 900);
+  ctx.globalAlpha = 1;
+  if (top5[0]) txt('BEST ' + top5[0] + '  •  TREES ' + bestTrees + '  •  STREAK ' + bestStreak, W * 0.5, H * 0.78, Math.min(14, H * 0.04), '#ffb703', 'center', W - 28, 700);
+}
+
+function drawOver(now) {
+  ctx.fillStyle = 'rgba(18, 13, 11, 0.84)'; ctx.fillRect(0, 0, W, H);
+  const pw = Math.min(W - 24, 350), ph = Math.min(H - safeTop - 20, 330);
+  const x = W * 0.5 - pw * 0.5, y = Math.max(safeTop + 8, (H - ph) * 0.5), k = ph / 330;
+  panel(x, y, pw, ph);
+  txt(G.reason || 'GARDEN CLOSED', W * 0.5, y + 28 * k, Math.min(20, pw / 13), '#ef476f', 'center', pw - 24, 900);
+  txt(String(Math.floor(G.score)), W * 0.5, y + 68 * k, Math.min(40, pw / 6.5), '#fff', 'center', pw - 24, 900);
+  txt(G.hiNew ? 'NEW HIGH SCORE!' : 'Trees Sculpted: ' + G.treesCleared + '  •  Best Streak: ' + G.maxStreak, W * 0.5, y + 102 * k, Math.min(13, pw / 20), G.hiNew ? '#ffb703' : '#e6ccb2', 'center', pw - 24, 800);
+  txt('TOP 5 GRANDMASTERS', W * 0.5, y + 128 * k, 11, '#d6c2b2', 'center', pw - 24, 700);
+
+  for (let i = 0; i < 5; i++) {
+    const yy = y + (150 + i * 22) * k, sc = top5[i], me = i === G.rank;
+    if (me) { rrect(x + 16, yy - 10 * k, pw - 32, 20 * k, 6); ctx.fillStyle = 'rgba(255,183,3,0.22)'; ctx.fill(); }
+    txt((i + 1) + '.', x + 28, yy, 13, me ? '#ffb703' : '#d6c2b2', 'left', 30, 800);
+    txt(sc === undefined ? '-' : String(sc), x + pw - 28, yy, 13, me ? '#ffb703' : '#fbf4e8', 'right', pw - 80, 800);
+  }
+  if (performance.now() - overAt > 800) {
+    ctx.globalAlpha = 0.65 + 0.35 * Math.sin(now * 0.007);
+    txt('TAP TO PRUNE AGAIN', W * 0.5, y + ph - 24 * k, Math.min(19, pw / 15), '#38b000', 'center', pw - 24, 900);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function draw(now) {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  if (G.shake > 0.3) ctx.translate(rr(-1, 1) * G.shake, rr(-1, 1) * G.shake);
+
+  drawZenGarden(now);
+  drawTreeAndCanopy(now);
+
+  for (const p of G.parts) {
+    ctx.globalAlpha = clamp(p.l / p.m, 0, 1);
+    ctx.fillStyle = p.c;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  for (const p of G.pops) {
+    ctx.globalAlpha = clamp(p.l * 1.4, 0, 1);
+    txt(p.t, clamp(p.x, 75, W - 75), p.y, p.sz, p.col, 'center', W - 20, 900);
+  }
+  ctx.globalAlpha = 1;
+  if (G.flash > 0) {
+    ctx.fillStyle = `rgba(239, 71, 111, ${G.flash * 0.35})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+  ctx.restore();
+
+  if (state === STATES.START) drawStart(now);
+  else {
+    drawHUD(now);
+    if (state === STATES.GAMEOVER) drawOver(now);
+  }
+}
+
+resize();
+resetGame();
+startLoop();
+})();
+</script>
+</body>
+</html>

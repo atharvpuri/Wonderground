@@ -1,0 +1,1043 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Glacier Curling</title>
+<style>
+:root{--bg:#0a192f;--fg:#f0f8ff;--accent:#ffb703;--jade:#06d6a0;--danger:#ef476f}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0a192f;--fg:#f0f8ff}}
+:root[data-theme="dark"]{--bg:#0a192f;--fg:#f0f8ff}
+html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;overscroll-behavior:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+canvas{position:fixed;inset:0;display:block;touch-action:none}
+#probe{position:fixed;top:0;left:0;visibility:hidden;padding-top:env(safe-area-inset-top,0px)}
+</style>
+</head>
+<body>
+<div id="probe"></div>
+<canvas id="c"></canvas>
+<script>
+(() => {
+'use strict';
+const STATES = { START: 0, PLAYING: 1, END_SUMMARY: 2, GAMEOVER: 3 };
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), probe = document.getElementById('probe');
+const TAU = Math.PI * 2, SHEET_W = 240, SHEET_L = 520, HOUSE_Y = -175, HACK_Y = 205, R_STONE = 13.5;
+const RINGS = [76, 52, 28, 10];
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const rr = (a, b) => a + Math.random() * (b - a);
+function mb(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* ---------- storage ---------- */
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+};
+const loadTop = () => {
+  try {
+    const a = JSON.parse(store.get('glaciercurling.top5') || '[]');
+    return Array.isArray(a) ? a.filter(n => typeof n === 'number' && isFinite(n)).slice(0, 5) : [];
+  } catch (e) { return []; }
+};
+let top5 = loadTop();
+let bestEnd = parseInt(store.get('glaciercurling.end') || '0', 10) || 0;
+let bestKO = parseInt(store.get('glaciercurling.ko') || '0', 10) || 0;
+function saveScore(sc, en, ko) {
+  const s = Math.floor(sc);
+  const a = top5.slice(); a.push(s); a.sort((x, y) => y - x); top5 = a.slice(0, 5);
+  store.set('glaciercurling.top5', JSON.stringify(top5));
+  if (en > bestEnd) { bestEnd = en; store.set('glaciercurling.end', String(bestEnd)); }
+  if (ko > bestKO) { bestKO = ko; store.set('glaciercurling.ko', String(bestKO)); }
+  return s > 0 ? top5.indexOf(s) : -1;
+}
+
+/* ---------- canvas & 2.5D ice sheet layout ---------- */
+let W = 360, H = 640, dpr = 1, safeTop = 0, S = 1, OX = 180, OY = 340, TILT = 0.88;
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 3);
+  W = window.innerWidth || 360;
+  H = window.innerHeight || 640;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  cv.style.width = W + 'px';
+  cv.style.height = H + 'px';
+  safeTop = probe.offsetHeight || 0;
+  const topPad = safeTop + Math.min(64, H * 0.13);
+  const botPad = Math.min(58, H * 0.12);
+  const availW = W - 24;
+  const availH = Math.max(140, H - topPad - botPad);
+  S = Math.min(availW / (SHEET_W + 36), availH / (SHEET_L * TILT + 24));
+  OX = W * 0.5;
+  OY = topPad + availH * 0.51;
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 120));
+
+const P = (wx, wy, wz = 0) => {
+  // Subtle perspective foreshortening toward the far house
+  const persp = 1 - (wy / SHEET_L) * 0.12;
+  return {
+    x: OX + wx * persp * S,
+    y: OY + wy * TILT * S - wz * S,
+    s: persp * S
+  };
+};
+const unP = (sx, sy) => {
+  const wy = (sy - OY) / (TILT * S);
+  const persp = 1 - (clamp(wy, -260, 260) / SHEET_L) * 0.12;
+  const wx = (sx - OX) / (persp * S);
+  return { x: wx, y: wy };
+};
+
+/* ---------- audio engine ---------- */
+let AC = null, noiseBuf = null, lastSweepSnd = 0;
+function audio() {
+  if (!AC) {
+    try {
+      const C = window.AudioContext || window.webkitAudioContext;
+      if (C) {
+        AC = new C();
+        noiseBuf = AC.createBuffer(1, AC.sampleRate, AC.sampleRate);
+        const d = noiseBuf.getChannelData(0);
+        for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+      }
+    } catch (e) { AC = null; }
+  }
+  if (AC && AC.state === 'suspended') AC.resume();
+  return AC;
+}
+function tone(type, f0, f1, dur, vol, delay = 0) {
+  const a = audio(); if (!a) return;
+  try {
+    const o = a.createOscillator(), g = a.createGain(), t = a.currentTime + delay;
+    o.type = type; o.frequency.setValueAtTime(f0, t);
+    o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(a.destination);
+    o.start(t); o.stop(t + dur + 0.03);
+  } catch (e) {}
+}
+function noise(dur, vol, freq, type = 'bandpass') {
+  const a = audio(); if (!a || !noiseBuf) return;
+  try {
+    const s = a.createBufferSource(), f = AC.createBiquadFilter(), g = a.createGain(), t = a.currentTime;
+    s.buffer = noiseBuf; f.type = type; f.frequency.value = freq;
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    s.connect(f); f.connect(g); g.connect(a.destination);
+    s.start(t); s.stop(t + dur + 0.02);
+  } catch (e) {}
+}
+const sfx = {
+  slide() {
+    noise(0.28, 0.14, 900, 'lowpass');
+    tone('sine', 140, 210, 0.22, 0.1);
+  },
+  sweep() {
+    const n = performance.now();
+    if (n - lastSweepSnd < 110) return;
+    lastSweepSnd = n;
+    noise(0.08, 0.16, 2800, 'highpass');
+  },
+  clack(v) {
+    const vol = clamp(v / 220, 0.06, 0.26);
+    tone('triangle', 680 + Math.random() * 180, 240, 0.085, vol);
+    tone('square', 210, 85, 0.065, vol * 0.8);
+  },
+  gem() {
+    tone('sine', 987.77, 1975.5, 0.22, 0.15);
+  },
+  scoreEnd() {
+    [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => tone('triangle', f, f * 1.02, 0.28, 0.13, i * 0.07));
+  },
+  fail() {
+    tone('sawtooth', 280, 65, 0.45, 0.16);
+  },
+  start() { tone('triangle', 330, 660, 0.15, 0.12); }
+};
+
+/* ---------- game state & level builder ---------- */
+let state = STATES.START, G = null, raf = 0, last = 0, overAt = 0, ui = [];
+const aim = { id: null, on: false, x0: 0, y0: 0, x: 0, y: 0 };
+let sweeping = false;
+
+function buildEnd(endIdx) {
+  const g = G, rnd = mb(3001 + endIdx * 167);
+  g.end = endIdx;
+  g.stonesLeft = 3;
+  g.ph = 'aim'; // 'aim' | 'slide'
+  g.stones = [];
+  g.gems = [];
+  g.rough = [];
+
+  // Spawn Red Rival Stones in and guarding the House!
+  const nRivals = Math.min(5, 2 + Math.floor(endIdx * 0.75));
+  // 1st rival sits near the Button (center bullseye)
+  g.stones.push({
+    team: 'red',
+    x: (rnd() - 0.5) * 24,
+    y: HOUSE_Y + (rnd() - 0.5) * 24,
+    vx: 0, vy: 0, spin: 0, rot: rnd() * TAU
+  });
+
+  // Additional rivals act as guards or house scorers
+  for (let i = 1; i < nRivals; i++) {
+    for (let tr = 0; tr < 25; tr++) {
+      const isGuard = (i % 2 === 1);
+      const rx = (rnd() - 0.5) * (isGuard ? 95 : 110);
+      const ry = isGuard ? HOUSE_Y + 95 + rnd() * 65 : HOUSE_Y + (rnd() - 0.5) * 90;
+      if (g.stones.every(s => Math.hypot(s.x - rx, s.y - ry) > R_STONE * 2.4)) {
+        g.stones.push({
+          team: 'red',
+          x: rx, y: ry,
+          vx: 0, vy: 0, spin: 0, rot: rnd() * TAU
+        });
+        break;
+      }
+    }
+  }
+
+  // Place 2 Gold Ice Gems along curved curling lanes (rewards using spin!)
+  for (let k = 0; k < 2; k++) {
+    const side = k === 0 ? -1 : 1;
+    const gx = side * (42 + rnd() * 44);
+    const gy = HOUSE_Y + 75 + k * 75 + (rnd() - 0.5) * 25;
+    g.gems.push({ x: gx, y: gy, r: 12, got: false, ph: rnd() * TAU });
+  }
+
+  // Place Frost Rough-Ice Patches on End 2+ (high friction unless swept!)
+  if (endIdx >= 1) {
+    const nRough = Math.min(2, 1 + Math.floor(endIdx / 3));
+    for (let r = 0; r < nRough; r++) {
+      const fx = (rnd() - 0.5) * 110;
+      const fy = rr(-45, 85);
+      g.rough.push({ x: fx, y: fy, rx: 38, ry: 24 });
+    }
+  }
+
+  spawnShooter();
+}
+
+function spawnShooter() {
+  const g = G;
+  g.shooter = {
+    team: 'gold',
+    x: 0, y: HACK_Y,
+    vx: 0, vy: 0,
+    spin: g.curlDir,
+    rot: 0,
+    active: true
+  };
+  g.ph = 'aim';
+}
+
+function resetGame() {
+  G = {
+    t: 0, end: 0, score: 0, lives: 3, streak: 0, maxStreak: 0, totalKO: 0,
+    curlDir: 1, // +1 = clockwise (curls right), -1 = counter-clockwise (curls left)
+    stonesLeft: 3, ph: 'aim',
+    shooter: null, stones: [], gems: [], rough: [],
+    broomT: 0, endSummary: '', summarySub: '', summaryT: 0,
+    parts: [], pops: [], trails: [],
+    shake: 0, slowmo: 1, flash: 0, hint: 1, shotsTaken: 0,
+    rank: -1, hiNew: false, reason: '', saved: false
+  };
+  buildEnd(0);
+}
+
+/* ---------- loop control ---------- */
+function stopLoop() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+function startLoop() { stopLoop(); last = performance.now(); raf = requestAnimationFrame(frame); }
+function frame(now) {
+  raf = requestAnimationFrame(frame);
+  const rawDt = Math.min(0.033, Math.max(0.001, (now - last) / 1000));
+  last = now;
+  update(rawDt * (G ? G.slowmo : 1), rawDt);
+  draw(now);
+}
+document.addEventListener('visibilitychange', () => {
+  aim.on = false; aim.id = null; sweeping = false;
+  document.hidden ? stopLoop() : startLoop();
+});
+window.addEventListener('blur', () => { aim.on = false; aim.id = null; sweeping = false; });
+
+function startGame() {
+  stopLoop();
+  aim.on = false; aim.id = null; sweeping = false;
+  resetGame();
+  state = STATES.PLAYING;
+  sfx.start();
+  startLoop();
+}
+
+/* ---------- trajectory simulator (exact match to real physics) ---------- */
+function simTrajectory(vx0, vy0, spinDir) {
+  let x = 0, y = HACK_Y, vx = vx0, vy = vy0;
+  const pts = [{ x, y }];
+  const dt = 0.025, fric = 78, curlK = 22;
+  for (let i = 0; i < 160; i++) {
+    const sp = Math.hypot(vx, vy);
+    if (sp < 4) break;
+    const decel = Math.min(sp, fric * dt);
+    vx -= (vx / sp) * decel;
+    vy -= (vy / sp) * decel;
+    // Lateral curl force perpendicular to velocity
+    vx += spinDir * curlK * ( Math.abs(vy) / 260 ) * dt;
+    x += vx * dt;
+    y += vy * dt;
+    if (i % 3 === 0) pts.push({ x, y });
+    if (Math.abs(x) > SHEET_W * 0.5 - R_STONE || y < -SHEET_L * 0.5) break;
+    // Stop preview at first stone contact so player sees exact collision point!
+    let hit = false;
+    for (const s of G.stones) {
+      if (Math.hypot(s.x - x, s.y - y) <= R_STONE * 2) {
+        pts.push({ x, y, hit: true, target: s });
+        hit = true;
+        break;
+      }
+    }
+    if (hit) break;
+  }
+  return pts;
+}
+
+/* ---------- helpers & juice ---------- */
+const mult = () => 1 + Math.min(G.streak, 12) * 0.25;
+function pop(t, col, wx, wy, sz = 19) {
+  const s = P(wx, wy, 18);
+  G.pops.push({ t, col, x: s.x, y: s.y, sz, l: 1.15 });
+}
+function burst(wx, wy, n, cols, sp = 180) {
+  const s = P(wx, wy, 10);
+  for (let i = 0; i < n && G.parts.length < 240; i++) {
+    const a = Math.random() * TAU, v = sp * rr(0.35, 1.15);
+    G.parts.push({ x: s.x, y: s.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 35, l: rr(0.35, 0.8), m: 0.8, c: cols[i % cols.length], r: rr(2, 4.2) });
+  }
+}
+
+function launchStone(vx, vy) {
+  const g = G, sh = g.shooter;
+  if (!sh || g.ph !== 'aim') return;
+  sh.vx = vx;
+  sh.vy = vy;
+  sh.spin = g.curlDir;
+  g.stones.push(sh);
+  g.shooter = null;
+  g.stonesLeft--;
+  g.shotsTaken++;
+  if (g.shotsTaken >= 1) g.hint = 0;
+  g.ph = 'slide';
+  sfx.slide();
+}
+
+function evaluateEnd() {
+  const g = G;
+  // Official Curling Rules + Arcade Bonuses:
+  // Measure distance of all stones inside the House (radius <= RINGS[0] + R_STONE) to the Button (0, HOUSE_Y)
+  const houseR = RINGS[0] + R_STONE;
+  const goldDists = [], redDists = [];
+
+  for (const s of g.stones) {
+    const d = Math.hypot(s.x, s.y - HOUSE_Y);
+    s.distToPin = d;
+    if (d <= houseR) {
+      if (s.team === 'gold') goldDists.push(d);
+      else redDists.push(d);
+    }
+  }
+  goldDists.sort((a, b) => a - b);
+  redDists.sort((a, b) => a - b);
+
+  const bestGold = goldDists.length ? goldDists[0] : 9999;
+  const bestRed = redDists.length ? redDists[0] : 9999;
+
+  if (bestGold < bestRed) {
+    // Player wins the End! Count how many gold stones are closer than the closest red stone
+    const scoringStones = goldDists.filter(d => d < bestRed).length;
+    const onPin = bestGold <= RINGS[3] + R_STONE * 0.5;
+    g.streak++;
+    g.maxStreak = Math.max(g.maxStreak, g.streak);
+
+    const endPts = Math.round((scoringStones * 200 + (onPin ? 250 : 0) + (g.end + 1) * 100) * mult());
+    g.score += endPts;
+    g.endSummary = `END ${g.end + 1} WON! +${endPts}`;
+    g.summarySub = `${scoringStones} IN THE HOUSE` + (onPin ? ' • ON THE BUTTON!' : '');
+    sfx.scoreEnd();
+    burst(0, HOUSE_Y, 42, ['#ffb703', '#06d6a0', '#ffffff'], 250);
+    if (g.end + 1 > bestEnd) { bestEnd = g.end + 1; store.set('glaciercurling.end', String(bestEnd)); }
+    state = STATES.END_SUMMARY;
+    g.summaryT = 2.1;
+  } else {
+    // Red stone is closer (or no gold stone in the house)
+    g.lives--;
+    g.streak = 0;
+    g.shake = 14;
+    g.flash = 0.65;
+    sfx.fail();
+    if (g.lives <= 0) {
+      g.reason = goldDists.length === 0 ? 'MISSED THE HOUSE!' : 'OUT-CURLED BY RIVAL!';
+      endGame();
+    } else {
+      g.endSummary = goldDists.length === 0 ? 'MISSED THE HOUSE!' : 'RIVAL CLOSER TO PIN!';
+      g.summarySub = `${g.lives} ${g.lives === 1 ? 'LIFE' : 'LIVES'} LEFT • NEXT END`;
+      state = STATES.END_SUMMARY;
+      g.summaryT = 2.0;
+    }
+  }
+}
+
+function endGame() {
+  if (G.saved) return;
+  G.saved = true;
+  state = STATES.GAMEOVER;
+  overAt = performance.now();
+  const prior = top5[0] || 0;
+  G.rank = saveScore(G.score, G.end + 1, G.totalKO);
+  G.hiNew = G.score > prior && G.score > 0;
+}
+
+/* ---------- update ---------- */
+function update(dt, rawDt) {
+  const g = G;
+  g.t += dt;
+  g.shake *= Math.exp(-8 * rawDt);
+  g.flash = Math.max(0, g.flash - rawDt * 2.5);
+  g.slowmo += (1 - g.slowmo) * Math.min(1, rawDt * 5);
+
+  for (let i = g.parts.length - 1; i >= 0; i--) {
+    const p = g.parts[i]; p.l -= rawDt;
+    if (p.l <= 0) { g.parts.splice(i, 1); continue; }
+    p.vy += 380 * rawDt; p.x += p.vx * rawDt; p.y += p.vy * rawDt;
+  }
+  for (let i = g.pops.length - 1; i >= 0; i--) {
+    const p = g.pops[i]; p.l -= rawDt;
+    if (p.l <= 0) g.pops.splice(i, 1); else p.y -= 28 * rawDt;
+  }
+  for (let i = g.trails.length - 1; i >= 0; i--) {
+    g.trails[i].l -= rawDt * 1.4;
+    if (g.trails[i].l <= 0) g.trails.splice(i, 1);
+  }
+
+  if (state === STATES.START || state === STATES.GAMEOVER) return;
+
+  if (state === STATES.END_SUMMARY) {
+    g.summaryT -= rawDt;
+    if (g.summaryT <= 0) {
+      buildEnd(g.end + 1);
+      state = STATES.PLAYING;
+    }
+    return;
+  }
+
+  if (g.ph !== 'slide') return;
+
+  if (sweeping) {
+    g.broomT += rawDt * 22;
+    sfx.sweep();
+  }
+
+  // Substepped Ice Physics & Elastic Stone Collisions
+  const sub = 4, h = dt / sub;
+  let anyMoving = false;
+
+  for (let step = 0; step < sub; step++) {
+    for (let i = g.stones.length - 1; i >= 0; i--) {
+      const s = g.stones[i];
+      const sp = Math.hypot(s.vx, s.vy);
+      if (sp > 2.5) {
+        anyMoving = true;
+        // Check if stone is over a Rough Frost Patch
+        let inRough = false;
+        for (const rg of g.rough) {
+          if (Math.hypot((s.x - rg.x) / rg.rx, (s.y - rg.y) / rg.ry) <= 1) {
+            inRough = true; break;
+          }
+        }
+        // Sweeping melts the pebble ice ahead of player stones, cutting friction in half!
+        const sweepFactor = (sweeping && s.team === 'gold') ? 0.46 : 1.0;
+        const fric = (inRough ? 155 : 78) * sweepFactor;
+        const decel = Math.min(sp, fric * h);
+        s.vx -= (s.vx / sp) * decel;
+        s.vy -= (s.vy / sp) * decel;
+
+        // Lateral curl curve when stone has spin
+        const curlMult = (sweeping && s.team === 'gold') ? 0.65 : 1.0;
+        if (s.spin && s.vy < -5) {
+          s.vx += s.spin * 22 * curlMult * (Math.abs(s.vy) / 260) * h;
+        }
+
+        s.x += s.vx * h;
+        s.y += s.vy * h;
+        s.rot += (s.spin || 1) * (sp * 0.025) * h;
+
+        if (step === 0 && Math.random() < 0.45) {
+          g.trails.push({ x: s.x, y: s.y, col: s.team === 'gold' ? '#ffbe0b' : '#ef476f', l: 0.55 });
+        }
+
+        // Check Gold Ice Gems
+        if (s.team === 'gold') {
+          for (const gm of g.gems) {
+            if (!gm.got && Math.hypot(s.x - gm.x, s.y - gm.y) < R_STONE + gm.r) {
+              gm.got = true;
+              const pts = Math.round(150 * mult());
+              g.score += pts;
+              sfx.gem();
+              pop('ICE GEM! +' + pts, '#ffbe0b', gm.x, gm.y, 19);
+              burst(gm.x, gm.y, 14, ['#ffbe0b', '#ffffff'], 170);
+            }
+          }
+        }
+
+        // Out-of-bounds Hog/Back/Side Line check
+        if (Math.abs(s.x) > SHEET_W * 0.5 - R_STONE * 0.4 || s.y < -SHEET_L * 0.5 + R_STONE) {
+          const wasRed = s.team === 'red';
+          const sx = s.x, sy = s.y;
+          g.stones.splice(i, 1);
+          if (wasRed) {
+            g.totalKO++;
+            const koPts = Math.round(180 * mult());
+            g.score += koPts;
+            g.shake = 10;
+            pop('TAKEOUT KO! +' + koPts, '#06d6a0', clamp(sx, -90, 90), clamp(sy, -210, 180), 21);
+            burst(sx, sy, 22, ['#ef476f', '#ffbe0b', '#ffffff'], 210);
+          } else {
+            pop('OUT OF BOUNDS!', '#adb5bd', clamp(sx, -90, 90), clamp(sy, -210, 180), 17);
+          }
+          continue;
+        }
+      } else {
+        s.vx = 0; s.vy = 0;
+      }
+    }
+
+    // Granite Stone-vs-Stone Elastic Collisions
+    for (let i = 0; i < g.stones.length; i++) {
+      const a = g.stones[i];
+      for (let j = i + 1; j < g.stones.length; j++) {
+        const b = g.stones[j];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const d = Math.hypot(dx, dy), minD = R_STONE * 2;
+        if (d < minD && d > 0.001) {
+          const nx = dx / d, ny = dy / d;
+          const ov = minD - d;
+          a.x -= nx * ov * 0.5; a.y -= ny * ov * 0.5;
+          b.x += nx * ov * 0.5; b.y += ny * ov * 0.5;
+
+          const rvx = b.vx - a.vx, rvy = b.vy - a.vy;
+          const vn = rvx * nx + rvy * ny;
+          if (vn < 0) {
+            const e = 0.92; // Crisp granite restitution
+            const jImp = -(1 + e) * vn * 0.5;
+            a.vx -= jImp * nx; a.vy -= jImp * ny;
+            b.vx += jImp * nx; b.vy += jImp * ny;
+            // Transfer a fraction of curl spin on angled hit
+            b.spin = a.spin * 0.5;
+            sfx.clack(Math.abs(vn));
+            g.shake = Math.max(g.shake, clamp(Math.abs(vn) / 28, 3, 12));
+            burst((a.x + b.x) * 0.5, (a.y + b.y) * 0.5, 10, ['#ffffff', '#90e0ef', '#ffbe0b'], 150);
+          }
+        }
+      }
+    }
+  }
+
+  // When all stones come to rest, either tee up next stone or score the End!
+  if (!anyMoving) {
+    sweeping = false;
+    if (g.stonesLeft > 0) {
+      spawnShooter();
+    } else {
+      evaluateEnd();
+    }
+  }
+}
+
+/* ---------- UI buttons & input ---------- */
+function spinBtnGeo() {
+  const bw = Math.min(185, W * 0.48), bh = Math.min(44, Math.max(36, H * 0.075));
+  return { x: OX - bw * 0.5, y: H - bh - 10, w: bw, h: bh };
+}
+function inSpinBtn(x, y) {
+  const b = spinBtnGeo();
+  return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+}
+
+function aimVector() {
+  const dx = aim.x - aim.x0, dy = aim.y - aim.y0;
+  const pull = clamp(dy / (135 * S), 0, 1);
+  const angle = clamp(Math.atan2(-dx, Math.max(20, dy)), -0.38, 0.38);
+  const spd = 175 + pull * 215;
+  return {
+    pull,
+    vx: Math.sin(angle) * spd,
+    vy: -Math.cos(angle) * spd
+  };
+}
+
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault(); audio();
+  try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+  if (state === STATES.START) { startGame(); return; }
+  if (state === STATES.GAMEOVER) { if (performance.now() - overAt > 800) startGame(); return; }
+  if (state !== STATES.PLAYING) return;
+
+  if (G.ph === 'aim' && inSpinBtn(e.clientX, e.clientY)) {
+    G.curlDir *= -1;
+    if (G.shooter) G.shooter.spin = G.curlDir;
+    sfx.clack(90);
+    return;
+  }
+
+  if (G.ph === 'slide') {
+    sweeping = true;
+    return;
+  }
+
+  if (G.ph === 'aim' && aim.id === null) {
+    aim.id = e.pointerId;
+    aim.on = true;
+    aim.x0 = aim.x = e.clientX;
+    aim.y0 = aim.y = e.clientY;
+  }
+});
+
+cv.addEventListener('pointermove', e => {
+  if (e.pointerId === aim.id && aim.on) {
+    aim.x = e.clientX;
+    aim.y = e.clientY;
+  }
+});
+
+function onUp(e) {
+  sweeping = false;
+  if (e.pointerId === aim.id) {
+    const v = aimVector();
+    aim.id = null;
+    aim.on = false;
+    if (state === STATES.PLAYING && G.ph === 'aim' && v.pull > 0.12) {
+      launchStone(v.vx, v.vy);
+    }
+  }
+}
+cv.addEventListener('pointerup', onUp);
+cv.addEventListener('pointercancel', () => { aim.id = null; aim.on = false; sweeping = false; });
+cv.addEventListener('contextmenu', e => e.preventDefault());
+
+window.addEventListener('keydown', e => {
+  const c = e.code;
+  if (c === 'KeyC' || c === 'ArrowLeft' || c === 'ArrowRight') {
+    if (!e.repeat && G && G.ph === 'aim') {
+      G.curlDir *= -1;
+      if (G.shooter) G.shooter.spin = G.curlDir;
+      sfx.clack(90);
+    }
+  } else if (c === 'Space' || c === 'Enter') {
+    e.preventDefault(); audio();
+    if (state === STATES.START && !e.repeat) startGame();
+    else if (state === STATES.GAMEOVER && !e.repeat && performance.now() - overAt > 800) startGame();
+    else if (state === STATES.PLAYING && G.ph === 'slide') sweeping = true;
+  }
+});
+window.addEventListener('keyup', e => {
+  if (e.code === 'Space' || e.code === 'Enter') sweeping = false;
+});
+
+/* ---------- rendering ---------- */
+function rrect(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function txt(s, x, y, sz, col, align = 'center', maxW = 0, weight = 800) {
+  let f = Math.max(8, sz);
+  ctx.font = weight + ' ' + f + 'px system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
+  if (maxW > 0) {
+    while (f > 9 && ctx.measureText(s).width > maxW) {
+      f--;
+      ctx.font = weight + ' ' + f + 'px system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
+    }
+  }
+  ctx.fillStyle = col; ctx.textAlign = align; ctx.textBaseline = 'middle';
+  ctx.fillText(s, x, y);
+}
+
+function drawIceSheet(now) {
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#091526');
+  bg.addColorStop(0.5, '#0f2540');
+  bg.addColorStop(1, '#060d18');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+  const tl = P(-SHEET_W * 0.5, -SHEET_L * 0.5);
+  const tr = P( SHEET_W * 0.5, -SHEET_L * 0.5);
+  const br = P( SHEET_W * 0.5,  SHEET_L * 0.5);
+  const bl = P(-SHEET_W * 0.5,  SHEET_L * 0.5);
+
+  // Outer Wooden Rink Boards
+  ctx.fillStyle = '#1e3a5f';
+  ctx.strokeStyle = '#ffbe0b';
+  ctx.lineWidth = 3 * S;
+  ctx.beginPath();
+  ctx.moveTo(tl.x - 8 * S, tl.y - 6 * S);
+  ctx.lineTo(tr.x + 8 * S, tr.y - 6 * S);
+  ctx.lineTo(br.x + 10 * S, br.y + 8 * S);
+  ctx.lineTo(bl.x - 10 * S, bl.y + 8 * S);
+  ctx.closePath();
+  ctx.fill(); ctx.stroke();
+
+  // Glacier Ice Sheet Surface
+  const ig = ctx.createLinearGradient(0, tl.y, 0, bl.y);
+  ig.addColorStop(0, '#d8f3fc');
+  ig.addColorStop(0.5, '#e8f8ff');
+  ig.addColorStop(1, '#ccebf7');
+  ctx.fillStyle = ig;
+  ctx.beginPath();
+  ctx.moveTo(tl.x, tl.y); ctx.lineTo(tr.x, tr.y);
+  ctx.lineTo(br.x, br.y); ctx.lineTo(bl.x, bl.y);
+  ctx.closePath();
+  ctx.fill();
+
+  // Concentric Target House Rings (Blue, White, Red, Button)
+  const hc = P(0, HOUSE_Y, 0);
+  const rCols = ['#1982c4', '#ffffff', '#ef476f', '#ffffff'];
+  for (let i = 0; i < 4; i++) {
+    const rx = RINGS[i] * hc.s;
+    const ry = rx * TILT;
+    ctx.fillStyle = rCols[i];
+    ctx.beginPath();
+    ctx.ellipse(hc.x, hc.y, rx, ry, 0, 0, TAU);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(10, 25, 47, 0.25)';
+    ctx.lineWidth = 1.2 * S;
+    ctx.stroke();
+  }
+
+  // Center Line, Tee Line & Hog Line
+  ctx.strokeStyle = 'rgba(25, 130, 196, 0.35)';
+  ctx.lineWidth = 1.5 * S;
+  const cTop = P(0, -SHEET_L * 0.48), cBot = P(0, SHEET_L * 0.48);
+  ctx.beginPath(); ctx.moveTo(cTop.x, cTop.y); ctx.lineTo(cBot.x, cBot.y); ctx.stroke();
+
+  const tL = P(-SHEET_W * 0.5, HOUSE_Y), tR = P(SHEET_W * 0.5, HOUSE_Y);
+  ctx.beginPath(); ctx.moveTo(tL.x, tL.y); ctx.lineTo(tR.x, tR.y); ctx.stroke();
+
+  const hL = P(-SHEET_W * 0.5, 95), hR = P(SHEET_W * 0.5, 95);
+  ctx.strokeStyle = 'rgba(239, 71, 111, 0.55)';
+  ctx.lineWidth = 3 * S;
+  ctx.beginPath(); ctx.moveTo(hL.x, hL.y); ctx.lineTo(hR.x, hR.y); ctx.stroke();
+
+  // Frost Rough-Ice Patches
+  for (const rg of G.rough) {
+    const p = P(rg.x, rg.y, 0);
+    ctx.fillStyle = 'rgba(100, 180, 220, 0.38)';
+    ctx.strokeStyle = 'rgba(25, 130, 196, 0.55)';
+    ctx.setLineDash([4 * S, 4 * S]);
+    ctx.lineWidth = 1.5 * S;
+    ctx.beginPath();
+    ctx.ellipse(p.x, p.y, rg.rx * p.s, rg.ry * p.s * TILT, 0, 0, TAU);
+    ctx.fill(); ctx.stroke();
+    ctx.setLineDash([]);
+    txt('FROST (SWEEP!)', p.x, p.y, Math.max(8, 8.5 * p.s), '#1e3a5f', 'center', 0, 800);
+  }
+
+  // Gold Ice Gems
+  for (const gm of G.gems) {
+    if (gm.got) continue;
+    const p = P(gm.x, gm.y, 6 + Math.sin(now * 0.005 + gm.ph) * 2);
+    const r = Math.max(4, gm.r * p.s);
+    ctx.fillStyle = '#ffbe0b';
+    ctx.strokeStyle = '#78350f';
+    ctx.lineWidth = 1.5 * S;
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y - r);
+    ctx.lineTo(p.x + r * 0.85, p.y);
+    ctx.lineTo(p.x, p.y + r);
+    ctx.lineTo(p.x - r * 0.85, p.y);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+  }
+
+  // Curling Trails
+  for (const tr of G.trails) {
+    const p = P(tr.x, tr.y, 0);
+    ctx.globalAlpha = clamp(tr.l, 0, 0.5);
+    ctx.fillStyle = tr.col;
+    ctx.beginPath(); ctx.arc(p.x, p.y, 3.5 * p.s, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawStone(s, isClosestGold) {
+  const pos = P(s.x, s.y, 0);
+  const r = Math.max(5, R_STONE * pos.s);
+
+  // Drop shadow on ice
+  ctx.fillStyle = 'rgba(10, 25, 47, 0.32)';
+  ctx.beginPath();
+  ctx.ellipse(pos.x + 2 * pos.s, pos.y + 3 * pos.s, r * 1.08, r * 0.88, 0, 0, TAU);
+  ctx.fill();
+
+  // Glowing green halo if this Gold stone is currently winning the House!
+  if (isClosestGold) {
+    ctx.strokeStyle = '#06d6a0';
+    ctx.lineWidth = 2.8 * pos.s;
+    ctx.beginPath();
+    ctx.ellipse(pos.x, pos.y, r * 1.38, r * 1.18, 0, 0, TAU);
+    ctx.stroke();
+  }
+
+  // Polished Scottish Granite Body
+  const gy = pos.y - r * 0.22;
+  ctx.fillStyle = '#495057';
+  ctx.beginPath();
+  ctx.ellipse(pos.x, pos.y, r, r * 0.84, 0, 0, TAU);
+  ctx.fill();
+
+  ctx.fillStyle = '#868e96';
+  ctx.beginPath();
+  ctx.ellipse(pos.x, gy, r * 0.94, r * 0.78, 0, 0, TAU);
+  ctx.fill();
+
+  // Colored Cap & Rotating Handle
+  const capCol = s.team === 'gold' ? '#ffbe0b' : '#ef476f';
+  ctx.fillStyle = capCol;
+  ctx.beginPath();
+  ctx.ellipse(pos.x, gy - r * 0.08, r * 0.64, r * 0.52, 0, 0, TAU);
+  ctx.fill();
+
+  ctx.save();
+  ctx.translate(pos.x, gy - r * 0.12);
+  ctx.rotate(s.rot || 0);
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = Math.max(2, r * 0.22);
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-r * 0.35, 0);
+  ctx.lineTo(r * 0.35, 0);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawAimAndBroom(now) {
+  const g = G;
+
+  // 1. Live Curved Trajectory Preview while Aiming!
+  if (state === STATES.PLAYING && g.ph === 'aim' && aim.on) {
+    const v = aimVector();
+    if (v.pull > 0.1) {
+      const pts = simTrajectory(v.vx, v.vy, g.curlDir);
+      ctx.save();
+      ctx.strokeStyle = '#0a192f';
+      ctx.lineWidth = 3 * S;
+      ctx.setLineDash([5 * S, 5 * S]);
+      ctx.beginPath();
+      pts.forEach((pt, idx) => {
+        const s = P(pt.x, pt.y, 2);
+        idx === 0 ? ctx.moveTo(s.x, s.y) : ctx.lineTo(s.x, s.y);
+      });
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      const lastPt = pts[pts.length - 1];
+      const ls = P(lastPt.x, lastPt.y, 2);
+      ctx.strokeStyle = lastPt.hit ? '#ef476f' : '#06d6a0';
+      ctx.lineWidth = 2.5 * S;
+      ctx.beginPath();
+      ctx.arc(ls.x, ls.y, R_STONE * ls.s, 0, TAU);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // 2. Active Sweeping Broom Animation ahead of sliding gold stone!
+  if (state === STATES.PLAYING && g.ph === 'slide' && sweeping) {
+    const movingGold = g.stones.find(s => s.team === 'gold' && Math.hypot(s.vx, s.vy) > 10);
+    if (movingGold) {
+      const sweepX = movingGold.x + Math.sin(g.broomT) * 16;
+      const sweepY = movingGold.y - 22;
+      const bp = P(sweepX, sweepY, 4);
+      ctx.save();
+      ctx.translate(bp.x, bp.y);
+      ctx.fillStyle = '#06d6a0';
+      rrect(-14 * bp.s, -4 * bp.s, 28 * bp.s, 8 * bp.s, 3 * bp.s);
+      ctx.fill();
+      ctx.strokeStyle = '#0a192f';
+      ctx.lineWidth = 3 * bp.s;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(18 * bp.s, -24 * bp.s);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+}
+
+function panel(x, y, w, h) {
+  rrect(x, y, w, h, 12);
+  ctx.fillStyle = 'rgba(10, 25, 47, 0.88)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255, 183, 3, 0.35)'; ctx.lineWidth = 1.5; ctx.stroke();
+}
+
+function drawHUD(now) {
+  const g = G, pad = 10, topY = safeTop + 6, ph = Math.min(48, H * 0.11);
+  const w1 = Math.min(135, W * 0.3), w2 = Math.min(125, W * 0.27), w3 = Math.min(130, W * 0.28);
+
+  panel(pad, topY, w1, ph);
+  txt('SCORE', pad + w1 * 0.5, topY + ph * 0.28, 10, '#94a3b8', 'center', w1 - 10, 700);
+  txt(String(Math.floor(g.score)), pad + w1 * 0.5, topY + ph * 0.68, Math.min(20, ph * 0.44), '#fff', 'center', w1 - 12, 900);
+
+  const x2 = W * 0.5 - w2 * 0.5;
+  panel(x2, topY, w2, ph);
+  txt('END ' + (g.end + 1), W * 0.5, topY + ph * 0.32, Math.min(14, ph * 0.34), '#ffb703', 'center', w2 - 8, 900);
+  // Remaining stones icons
+  for (let i = 0; i < 3; i++) {
+    const sx = W * 0.5 + (i - 1) * 16, sy = topY + ph * 0.72;
+    ctx.fillStyle = i < g.stonesLeft ? '#ffb703' : 'rgba(255,255,255,0.18)';
+    ctx.beginPath(); ctx.arc(sx, sy, 5, 0, TAU); ctx.fill();
+  }
+
+  const x3 = W - pad - w3;
+  panel(x3, topY, w3, ph);
+  for (let i = 0; i < 3; i++) {
+    const hx = x3 + w3 * (0.22 + i * 0.28), hy = topY + ph * 0.5, r = Math.min(7, w3 / 12);
+    ctx.fillStyle = i < g.lives ? '#06d6a0' : 'rgba(255,255,255,0.16)';
+    ctx.beginPath(); ctx.arc(hx, hy, r, 0, TAU); ctx.fill();
+  }
+
+  // Bottom Curl Spin Toggle Button (Aim Phase) OR Sweep Prompt (Slide Phase)
+  const sb = spinBtnGeo();
+  if (state === STATES.PLAYING && g.ph === 'aim') {
+    rrect(sb.x, sb.y, sb.w, sb.h, 10);
+    ctx.fillStyle = '#1e3a5f';
+    ctx.fill();
+    ctx.strokeStyle = '#ffb703';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    const dirTxt = g.curlDir > 0 ? 'CURL: RIGHT ↷' : 'CURL: LEFT ↶';
+    txt(dirTxt, sb.x + sb.w * 0.5, sb.y + sb.h * 0.38, Math.min(14, sb.h * 0.34), '#ffb703', 'center', sb.w - 14, 900);
+    txt('TAP TO SWITCH SPIN', sb.x + sb.w * 0.5, sb.y + sb.h * 0.74, Math.min(9.5, sb.h * 0.23), '#f0f8ff', 'center', sb.w - 14, 700);
+  } else if (state === STATES.PLAYING && g.ph === 'slide') {
+    rrect(sb.x, sb.y, sb.w, sb.h, 10);
+    ctx.fillStyle = sweeping ? '#06d6a0' : '#1e3a5f';
+    ctx.fill();
+    txt(sweeping ? 'SWEEPING ICE! (FARTHER)' : 'HOLD ANYWHERE TO SWEEP!', sb.x + sb.w * 0.5, sb.y + sb.h * 0.5, Math.min(12, sb.h * 0.32), sweeping ? '#0a192f' : '#06d6a0', 'center', sb.w - 12, 900);
+  }
+
+  if (state === STATES.PLAYING && g.hint > 0 && g.ph === 'aim') {
+    const hw = Math.min(320, W * 0.9), hy = sb.y - 24;
+    panel(W * 0.5 - hw * 0.5, hy - 18, hw, 36);
+    txt('PULL BACK from stone to aim & release • Take your time!', W * 0.5, hy, 11.5, '#fff', 'center', hw - 16, 800);
+  }
+
+  if (state === STATES.END_SUMMARY) {
+    const bw = Math.min(310, W * 0.88), by = H * 0.46;
+    panel(W * 0.5 - bw * 0.5, by - 42, bw, 84);
+    txt(g.endSummary, W * 0.5, by - 14, 21, '#ffb703', 'center', bw - 18, 900);
+    txt(g.summarySub, W * 0.5, by + 16, 13, '#06d6a0', 'center', bw - 18, 800);
+  }
+}
+
+function drawStart(now) {
+  ctx.fillStyle = 'rgba(8, 20, 38, 0.74)'; ctx.fillRect(0, 0, W, H);
+  const titleSz = Math.min(46, W / 7.5, H * 0.12);
+  txt('GLACIER CURLING', W * 0.5, H * 0.25, titleSz, '#ffb703', 'center', W - 28, 900);
+  txt('Pull back to curl around guards • Knock rivals off the pin', W * 0.5, H * 0.41, Math.min(14, W / 25, H * 0.045), '#f0f8ff', 'center', W - 28, 600);
+  txt('Hold while sliding to SWEEP the ice & carry farther!', W * 0.5, H * 0.49, Math.min(13, W / 26, H * 0.04), '#06d6a0', 'center', W - 28, 700);
+  ctx.globalAlpha = 0.65 + 0.35 * Math.sin(now * 0.006);
+  txt('TAP / CLICK TO CURL', W * 0.5, H * 0.66, Math.min(24, W / 13, H * 0.07), '#06d6a0', 'center', W - 28, 900);
+  ctx.globalAlpha = 1;
+  if (top5[0]) txt('BEST ' + top5[0] + '  •  END ' + bestEnd + '  •  KOs ' + bestKO, W * 0.5, H * 0.78, Math.min(14, H * 0.04), '#ffb703', 'center', W - 28, 700);
+}
+
+function drawOver(now) {
+  ctx.fillStyle = 'rgba(8, 20, 38, 0.84)'; ctx.fillRect(0, 0, W, H);
+  const pw = Math.min(W - 24, 350), ph = Math.min(H - safeTop - 20, 330);
+  const x = W * 0.5 - pw * 0.5, y = Math.max(safeTop + 8, (H - ph) * 0.5), k = ph / 330;
+  panel(x, y, pw, ph);
+  txt(G.reason || 'MATCH OVER', W * 0.5, y + 28 * k, Math.min(20, pw / 13), '#ef476f', 'center', pw - 24, 900);
+  txt(String(Math.floor(G.score)), W * 0.5, y + 68 * k, Math.min(40, pw / 6.5), '#fff', 'center', pw - 24, 900);
+  txt(G.hiNew ? 'NEW HIGH SCORE!' : 'Reached End ' + (G.end + 1) + '  •  Takeouts: ' + G.totalKO, W * 0.5, y + 102 * k, Math.min(13, pw / 20), G.hiNew ? '#ffb703' : '#cbd5e1', 'center', pw - 24, 800);
+  txt('TOP 5 SKIPS', W * 0.5, y + 128 * k, 11, '#94a3b8', 'center', pw - 24, 700);
+
+  for (let i = 0; i < 5; i++) {
+    const yy = y + (150 + i * 22) * k, sc = top5[i], me = i === G.rank;
+    if (me) { rrect(x + 16, yy - 10 * k, pw - 32, 20 * k, 6); ctx.fillStyle = 'rgba(255,183,3,0.22)'; ctx.fill(); }
+    txt((i + 1) + '.', x + 28, yy, 13, me ? '#ffb703' : '#94a3b8', 'left', 30, 800);
+    txt(sc === undefined ? '-' : String(sc), x + pw - 28, yy, 13, me ? '#ffb703' : '#f0f8ff', 'right', pw - 80, 800);
+  }
+  if (performance.now() - overAt > 800) {
+    ctx.globalAlpha = 0.65 + 0.35 * Math.sin(now * 0.007);
+    txt('TAP TO PLAY AGAIN', W * 0.5, y + ph - 24 * k, Math.min(19, pw / 15), '#06d6a0', 'center', pw - 24, 900);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function draw(now) {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  if (G.shake > 0.3) ctx.translate(rr(-1, 1) * G.shake, rr(-1, 1) * G.shake);
+
+  drawIceSheet(now);
+  drawAimAndBroom(now);
+
+  // Find which stone is currently closest to the Button (0, HOUSE_Y)
+  let bestGold = null, minD = RINGS[0] + R_STONE;
+  let bestRedD = 9999;
+  for (const s of G.stones) {
+    const d = Math.hypot(s.x, s.y - HOUSE_Y);
+    if (s.team === 'red' && d < bestRedD) bestRedD = d;
+  }
+  for (const s of G.stones) {
+    const d = Math.hypot(s.x, s.y - HOUSE_Y);
+    if (s.team === 'gold' && d < minD && d < bestRedD) {
+      minD = d; bestGold = s;
+    }
+  }
+
+  const allStones = G.shooter ? [...G.stones, G.shooter] : G.stones.slice();
+  allStones.sort((a, b) => a.y - b.y);
+  for (const s of allStones) drawStone(s, s === bestGold);
+
+  for (const p of G.parts) {
+    ctx.globalAlpha = clamp(p.l / p.m, 0, 1);
+    ctx.fillStyle = p.c;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  for (const p of G.pops) {
+    ctx.globalAlpha = clamp(p.l * 1.4, 0, 1);
+    txt(p.t, clamp(p.x, 75, W - 75), p.y, p.sz, p.col, 'center', W - 20, 900);
+  }
+  ctx.globalAlpha = 1;
+  if (G.flash > 0) {
+    ctx.fillStyle = `rgba(239, 71, 111, ${G.flash * 0.35})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+  ctx.restore();
+
+  if (state === STATES.START) drawStart(now);
+  else {
+    drawHUD(now);
+    if (state === STATES.GAMEOVER) drawOver(now);
+  }
+}
+
+resize();
+resetGame();
+startLoop();
+})();
+</script>
+</body>
+</html>
