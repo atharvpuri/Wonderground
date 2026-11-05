@@ -94,6 +94,19 @@ nav .go.on{background:var(--ac);color:#06101c;opacity:1;filter:none}nav .go svg{
 .play-layout>.col{flex:none}
 @media(min-width:860px){.play-layout>.col{flex-direction:row;align-items:flex-end;gap:14px}.play-layout .ctl{flex-direction:column;height:auto;width:80px;gap:8px}.play-layout .ctl button{flex:none;height:62px}}
 @media(max-width:859px){.play-layout{width:100%;padding:0;display:block}.game-info{display:none}}
+/* quiet, pointer-led atmosphere */
+.amb{opacity:1}
+.amb i,.amb i::before,.amb i::after{display:none!important}
+.amb::before{display:block;inset:0;background:radial-gradient(260px 210px at var(--px,50%) var(--py,45%),rgba(85,231,255,.18),transparent 72%),radial-gradient(520px 360px at calc(var(--px,50%) + 12%) calc(var(--py,45%) + 10%),rgba(255,63,159,.1),transparent 74%);filter:blur(20px);opacity:.8;animation:liquidBreathe 8s ease-in-out infinite alternate}
+.amb::after{content:"";position:absolute;left:calc(var(--px,50%) - 210px);top:calc(var(--py,45%) - 140px);width:420px;height:280px;border-radius:48% 52% 62% 38%;background:conic-gradient(from 25deg,rgba(85,231,255,.14),rgba(255,63,159,.1),transparent 42%,rgba(85,231,255,.12),transparent 78%);filter:blur(38px);opacity:.7;mix-blend-mode:screen;animation:liquidFlow 10s ease-in-out infinite alternate;transition:left .35s ease-out,top .35s ease-out}
+@keyframes liquidBreathe{to{transform:scale(1.08) rotate(3deg);opacity:.95}}
+@keyframes liquidFlow{to{transform:translate3d(34px,-22px,0) rotate(18deg) scale(1.12)}}
+.play-layout{position:relative;width:min(100%,980px);padding:0}
+.play-layout>.col{margin:0 auto}
+@media(min-width:1100px){.game-info{position:absolute;left:0;top:50%;transform:translateY(-50%)}}
+@media(min-width:860px) and (max-width:1099px){.game-info{display:none}.play-layout{width:100%}}
+@media(min-width:860px){.play-layout>.col{position:relative;left:48px}}
+@media(max-width:859px){.amb::before{opacity:.55}.amb::after{width:280px;height:190px;left:calc(var(--px,50%) - 140px);top:calc(var(--py,45%) - 95px);opacity:.45}}
 /* pages */
 .scroll{height:100%;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--s3) transparent;padding-bottom:30px}
 .pad{padding:0 18px}
@@ -404,6 +417,8 @@ document.addEventListener("click",e=>{const s=e.target.closest("[data-s]");if(s)
  const c=e.target.closest(".card");if(c)openGame(c.dataset.f)});
 document.addEventListener("mousemove",e=>{if(!S.motion)return;const c=e.target.closest&&e.target.closest(".card");if(!c)return;const r=c.getBoundingClientRect();c.style.setProperty("--ry",((e.clientX-r.left)/r.width-.5)*12+"deg");c.style.setProperty("--rx",(.5-(e.clientY-r.top)/r.height)*12+"deg")});
 document.addEventListener("mouseout",e=>{const c=e.target.closest&&e.target.closest(".card");if(c){c.style.removeProperty("--rx");c.style.removeProperty("--ry")}});
+let glowFrame=0;
+document.addEventListener("pointermove",e=>{if(glowFrame)return;glowFrame=requestAnimationFrame(()=>{document.documentElement.style.setProperty("--px",`${e.clientX}px`);document.documentElement.style.setProperty("--py",`${e.clientY}px`);glowFrame=0})},{passive:true});
 /* views */
 function show(v){$$(".view").forEach(x=>x.classList.toggle("on",x.id===v));$$("nav button").forEach(b=>b.classList.toggle("on",b.dataset.v===v));
  if(v!=="play"){const s=feed.children[cur],f=s&&s.querySelector&&s.querySelector("iframe");if(f)f.remove();if(s&&s.querySelector){const l=s.querySelector(".loader");if(l)l.classList.remove("off")}cur=-1}
