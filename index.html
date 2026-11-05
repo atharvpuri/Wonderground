@@ -10,8 +10,11 @@
 :root{--bg:#030817;--s1:#081936;--s2:#0d2854;--s3:#17417e;--line:#245b9f;--tx:#f7fbff;--mu:#aec4e4;--r:.5625;--ac:#238bff;--ac2:#ff3f9f;--glow:#18d4ff}
 *{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}
 html,body{position:fixed;inset:0;height:100%;width:100%;margin:0;padding:0;background:radial-gradient(ellipse at 68% 42%,#123b70 0,#091d42 32%,#040b1e 68%,var(--bg) 100%);color:var(--tx);font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden}
+body::before{content:"";position:fixed;inset:0;z-index:-3;background:#03050b url("bg.png") center/cover no-repeat;pointer-events:none}
+body::after{content:"";position:fixed;inset:0;z-index:-2;background:rgba(2,5,12,.58);pointer-events:none}
 button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.fluid-canvas{position:fixed;inset:0;width:100%;height:100%;z-index:0;display:block;pointer-events:none;mix-blend-mode:screen;opacity:.46}
 .amb{position:fixed;inset:0;overflow:hidden;z-index:0;pointer-events:none}
 .amb::before{content:"";position:absolute;inset:-20%;background-image:radial-gradient(circle at 20% 30%,rgba(24,212,255,.32) 0 1px,transparent 2px),radial-gradient(circle at 68% 18%,rgba(255,63,159,.28) 0 1px,transparent 2px),radial-gradient(circle at 84% 72%,rgba(35,139,255,.3) 0 1px,transparent 2px);background-size:190px 170px,260px 230px,220px 200px;opacity:.5;animation:starDrift 32s linear infinite}
 .amb i{position:absolute;width:55vmax;height:55vmax;border-radius:50%;filter:blur(90px);opacity:.3;animation:drift 18s ease-in-out infinite alternate}
@@ -28,7 +31,7 @@ svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.8;stroke
 #app{position:fixed;inset:0;z-index:1;width:100%;height:100%;min-height:100%;display:flex;flex-direction:column;padding:0;background:transparent}
 header{height:52px;flex:none;display:flex;align-items:center;justify-content:space-between;padding:0;background:transparent;backdrop-filter:none;border:0}
 .logo{display:flex;align-items:center;gap:10px;font-weight:900;letter-spacing:.15em;font-size:15px;position:relative}.logo b{color:var(--tx);line-height:1}.logoMark{width:36px;height:36px;display:block;flex:none;border:1px solid rgba(255,63,159,.9);border-radius:11px;background:#070d21;box-shadow:0 0 0 3px rgba(255,63,159,.1),0 0 22px rgba(255,63,159,.3)}
-.logoMark svg{width:100%;height:100%;display:block;stroke-width:2.8}.logoMark .mark-cyan{stroke:var(--glow)}.logoMark .mark-pink{stroke:var(--ac2)}
+.logoMark{overflow:hidden}.logoMark img{width:100%;height:100%;display:block;object-fit:contain}
 .hr{display:flex;align-items:center;gap:6px}
 .chip{font-size:12px;font-weight:700;color:var(--mu);padding:0 8px;font-variant-numeric:tabular-nums}.chip b{color:var(--ac)}
 .ib{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;color:var(--mu);transition:.15s}.ib:hover{background:var(--s2);color:var(--tx)}
@@ -216,9 +219,9 @@ html,body{background:radial-gradient(ellipse at 50% 45%,#171a3d 0,#0b0d1b 42%,#0
 .view#disc,.view#saved,.view#home{padding-right:126px}
 @media(max-width:859px){.slide .mid{width:min(100%,420px)}.stage{width:100%;height:auto;aspect-ratio:.5625}.ctl{width:min(100%,420px)}.site-footer{width:auto}.view#disc,.view#saved,.view#home{padding-right:0}}
 </style></head>
-<body><div class="amb"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+<body><div class="amb"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><canvas class="fluid-canvas" id="fluidCanvas" aria-hidden="true"></canvas>
 <div id="app">
-<header><div class="logo" aria-label="Wonderground"><span class="logoMark" aria-hidden="true"><svg viewBox="0 0 40 40"><path class="mark-cyan" d="M8 11v13l5 5 7-7 7 7 5-5V11"/><path class="mark-pink" d="M8 11l5 5 7-7 7 7 5-5"/></svg></span><b>WONDERGROUND</b></div><div class="hr"><span class="chip"><b id="pc">0</b> played</span><div class="authWrap"><button class="auth" id="auth" type="button"><span class="googleMark" aria-hidden="true">G</span><span id="authLabel">Sign up</span></button><div class="authNote" id="authNote"><button id="authNoteClose" type="button" aria-label="Close">×</button><b>Save your games.</b><br>Sign in to keep favorites and progress across devices. You can still play without signing in.</div></div><button class="ib" id="snd" aria-label="Sound"></button></div></header>
+<header><div class="logo" aria-label="Wonderground"><span class="logoMark" aria-hidden="true"><img src="logo.png" alt=""></span><b>WONDERGROUND</b></div><div class="hr"><span class="chip"><b id="pc">0</b> played</span><div class="authWrap"><button class="auth" id="auth" type="button"><span class="googleMark" aria-hidden="true">G</span><span id="authLabel">Sign up</span></button><div class="authNote" id="authNote"><button id="authNoteClose" type="button" aria-label="Close">×</button><b>Save your games.</b><br>Sign in to keep favorites and progress across devices. You can still play without signing in.</div></div><button class="ib" id="snd" aria-label="Sound"></button></div></header>
 <div class="body">
 <nav id="nav"></nav>
 <main>
@@ -432,4 +435,38 @@ $("#snd").onclick=()=>{S.muted=!S.muted;apply();toast(S.muted?"Sound off":"Sound
 apply();build();
 const h=decodeURIComponent((location.hash.match(/g=([^&]+)/)||[])[1]||"");
 setTimeout(()=>{if(h&&byF(h))openGame(h);else activate(0)},30);
+</script>
+<script>
+/* Background fluid: GPU ping-pong solver kept independent from the game feed. */
+(()=>{const canvas=document.querySelector("#fluidCanvas"),gl=canvas&&canvas.getContext("webgl2",{alpha:true,antialias:false,preserveDrawingBuffer:false});if(!gl)return;
+const vs=`#version 300 es
+in vec2 p;out vec2 uv;void main(){uv=p*.5+.5;gl_Position=vec4(p,0.,1.);}`;
+const fs=(body,defs="")=>`#version 300 es
+precision highp float;in vec2 uv;out vec4 o;${defs}${body}`;
+const compile=(type,src)=>{const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(s));return s};
+const program=(frag)=>{const p=gl.createProgram();gl.attachShader(p,compile(gl.VERTEX_SHADER,vs));gl.attachShader(p,compile(gl.FRAGMENT_SHADER,frag));gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(p));return p};
+const adv=program(fs(`uniform sampler2D x;uniform sampler2D v;uniform vec2 px;uniform float dt,diss;void main(){vec2 back=uv-dt*texture(v,uv).xy*px; o=diss*texture(x,back);}`));
+const splat=program(fs(`uniform sampler2D x;uniform vec2 point,aspect,force;uniform vec4 color;uniform float radius;void main(){vec2 d=(uv-point)*aspect;float a=exp(-dot(d,d)/radius);o=texture(x,uv)+color*a;}`));
+const div=program(fs(`uniform sampler2D v;uniform vec2 px;void main(){vec2 l=texture(v,uv-vec2(px.x,0)).xy,r=texture(v,uv+vec2(px.x,0)).xy,bot=texture(v,uv-vec2(0,px.y)).xy,top=texture(v,uv+vec2(0,px.y)).xy;o=vec4(.5*(r.x-l.x+top.y-bot.y),0.,0.,1.);}`));
+const pressure=program(fs(`uniform sampler2D p,d;uniform vec2 px;void main(){float l=texture(p,uv-vec2(px.x,0)).x,r=texture(p,uv+vec2(px.x,0)).x,b=texture(p,uv-vec2(0,px.y)).x,t=texture(p,uv+vec2(0,px.y)).x;float c=texture(d,uv).x;o=vec4((l+r+b+t-c)*.25,0,0,1.);}`));
+const grad=program(fs(`uniform sampler2D v,p;uniform vec2 px;void main(){float l=texture(p,uv-vec2(px.x,0)).x,r=texture(p,uv+vec2(px.x,0)).x,b=texture(p,uv-vec2(0,px.y)).x,t=texture(p,uv+vec2(0,px.y)).x;o=vec4(texture(v,uv).xy-vec2(r-l,t-b)*.5,0,1);}`));
+const display=program(fs(`uniform sampler2D x;void main(){vec3 c=texture(x,uv).rgb;c=1.-exp(-c*1.35);o=vec4(c,.86);}`));
+const quad=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,quad);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+const makeTex=(w,h)=>{const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);return t};
+let w=0,h=0,vel,dye,prs,divergence,divF,frame=0,last=performance.now(),idle=0,quality=innerWidth<700?.5:.72,events=[];
+const target=()=>{const scale=Math.min(devicePixelRatio||1.5,2),max=innerWidth<700?520:900;w=Math.max(160,Math.floor(innerWidth*scale*quality));h=Math.max(120,Math.floor(innerHeight*scale*quality));return [w,h]};
+const pair=()=>{const a=makeTex(w,h),b=makeTex(w,h),f=gl.createFramebuffer();return{a,b,f,read:a,write:b}};
+const resize=()=>{const old=target();vel=pair();dye=pair();prs=pair();divergence=makeTex(w,h);divF=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,divF);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,divergence,0);canvas.width=innerWidth*(devicePixelRatio||1);canvas.height=innerHeight*(devicePixelRatio||1);canvas.style.width=innerWidth+"px";canvas.style.height=innerHeight+"px"};
+const bind=(p,tex,unit=0)=>{gl.activeTexture(gl.TEXTURE0+unit);gl.bindTexture(gl.TEXTURE_2D,tex);gl.uniform1i(gl.getUniformLocation(p,"x"),unit)};
+const draw=(p,targetTex,uniforms)=>{gl.useProgram(p);gl.viewport(0,0,p===display?canvas.width: w,p===display?canvas.height:h);const loc=gl.getAttribLocation(p,"p");gl.bindBuffer(gl.ARRAY_BUFFER,quad);gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);if(uniforms)uniforms();gl.drawArrays(gl.TRIANGLE_STRIP,0,4);};
+const swap=q=>{const t=q.read;q.read=q.write;q.write=t};
+const pass=(p,q,setup)=>{gl.bindFramebuffer(gl.FRAMEBUFFER,q.f);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,q.write,0);draw(p,q.write,setup);swap(q)};
+const texel=()=>[1/w,1/h];
+const splatAt=(x,y,dx,dy,color)=>{pass(splat,vel,()=>{bind(splat,vel.read);gl.uniform2f(gl.getUniformLocation(splat,"point"),x,y);gl.uniform2f(gl.getUniformLocation(splat,"aspect"),w/h,1);gl.uniform2f(gl.getUniformLocation(splat,"force"),dx,dy);gl.uniform4f(gl.getUniformLocation(splat,"color"),dx*1.8,dy*1.8,0,1);gl.uniform1f(gl.getUniformLocation(splat,"radius"),.0012)});pass(splat,dye,()=>{bind(splat,dye.read);gl.uniform2f(gl.getUniformLocation(splat,"point"),x,y);gl.uniform2f(gl.getUniformLocation(splat,"aspect"),w/h,1);gl.uniform2f(gl.getUniformLocation(splat,"force"),0,0);gl.uniform4f(gl.getUniformLocation(splat,"color"),color[0],color[1],color[2],1);gl.uniform1f(gl.getUniformLocation(splat,"radius"),.004)})};
+const simulate=(dt)=>{const px=texel();pass(adv,vel,()=>{bind(adv,vel.read);gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,vel.read);gl.uniform1i(gl.getUniformLocation(adv,"v"),1);gl.uniform2f(gl.getUniformLocation(adv,"px"),px[0],px[1]);gl.uniform1f(gl.getUniformLocation(adv,"dt"),dt);gl.uniform1f(gl.getUniformLocation(adv,"diss"),.992)});pass(adv,dye,()=>{bind(adv,dye.read);gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,vel.read);gl.uniform1i(gl.getUniformLocation(adv,"v"),1);gl.uniform2f(gl.getUniformLocation(adv,"px"),px[0],px[1]);gl.uniform1f(gl.getUniformLocation(adv,"dt"),dt);gl.uniform1f(gl.getUniformLocation(adv,"diss"),.988)});gl.bindFramebuffer(gl.FRAMEBUFFER,divF);draw(div,null,()=>{gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,vel.read);gl.uniform1i(gl.getUniformLocation(div,"v"),0);gl.uniform2f(gl.getUniformLocation(div,"px"),px[0],px[1])});for(let i=0;i<10;i++)pass(pressure,prs,()=>{bind(pressure,prs.read);gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,divergence);gl.uniform1i(gl.getUniformLocation(pressure,"d"),1);gl.uniform2f(gl.getUniformLocation(pressure,"px"),px[0],px[1])});pass(grad,vel,()=>{bind(grad,vel.read);gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,prs.read);gl.uniform1i(gl.getUniformLocation(grad,"p"),1);gl.uniform2f(gl.getUniformLocation(grad,"px"),px[0],px[1])})};
+const render=()=>{if(document.body.classList.contains("nomo")){canvas.style.opacity="0";requestAnimationFrame(render);return}canvas.style.opacity=".46";const now=performance.now(),dt=Math.min(.025,(now-last)/1000);last=now;if(events.length){const e=events.splice(0,1)[0];splatAt(e.x,e.y,e.dx,e.dy,e.color);idle=now}else if(now-idle>3200){splatAt(.25+Math.random()*.5,.25+Math.random()*.5,(Math.random()-.5)*.003,(Math.random()-.5)*.003,[.12,.02,.08]);idle=now}simulate(dt);gl.bindFramebuffer(gl.FRAMEBUFFER,null);draw(display,null,()=>bind(display,dye.read));requestAnimationFrame(render)};
+const input=(x,y,px,py)=>{const dx=(x-px)/innerWidth*2,dy=-(y-py)/innerHeight*2;events.push({x:x/innerWidth,y:1-y/innerHeight,dx,dy,color:Math.random()>.5?[.2,.03,.16]:[.02,.16,.22]});if(events.length>3)events.shift()};
+let lastPoint=null;addEventListener("pointermove",e=>{if(!S.motion)return;const p=lastPoint||[e.clientX,e.clientY];input(e.clientX,e.clientY,p[0],p[1]);lastPoint=[e.clientX,e.clientY]},{passive:true});addEventListener("pointerup",()=>{lastPoint=null},{passive:true});addEventListener("touchmove",e=>{if(!S.motion||!e.touches[0])return;const t=e.touches[0],p=lastPoint||[t.clientX,t.clientY];input(t.clientX,t.clientY,p[0],p[1]);lastPoint=[t.clientX,t.clientY]},{passive:true});
+addEventListener("resize",resize);resize();idle=performance.now();render();
+})()
 </script></body></html>
