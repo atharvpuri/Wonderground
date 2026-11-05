@@ -121,13 +121,13 @@ h3.t{font-size:19px;font-weight:800;padding:22px 18px 10px}
 input[type=range]{width:100%;accent-color:var(--ac);margin:12px 0 4px}
 #toast{position:fixed;left:50%;bottom:92px;transform:translate(-50%,20px);background:var(--tx);color:#0a0a0c;font-weight:800;padding:11px 20px;border-radius:99px;opacity:0;pointer-events:none;transition:.25s;z-index:30}#toast.on{opacity:1;transform:translate(-50%,0)}
 .nomo *,.nomo *::before,.nomo *::after{animation:none!important;transition:none!important}
-.site-footer{position:fixed;left:50%;bottom:14px;z-index:4;width:auto;padding:0;color:var(--mu);font-size:14px;transform:translateX(-50%)}
+.site-footer{position:fixed;right:24px;top:50%;z-index:4;width:auto;padding:0;color:var(--mu);font-size:14px;transform:translateY(-50%)}
 .site-footer p{display:none}
-.site-footer nav{display:flex;flex-direction:row;align-items:center;justify-content:center;width:auto;padding:0;gap:10px;background:rgba(3,8,23,.78);border:1px solid rgba(36,91,159,.75);border-radius:16px;box-shadow:0 12px 34px rgba(0,0,0,.28);backdrop-filter:blur(14px)}
-.site-footer a{display:inline-flex;align-items:center;gap:9px;padding:11px 18px;border:1px solid transparent;border-radius:12px;color:var(--mu);text-decoration:none;transition:.15s}
+.site-footer nav{display:flex;flex-direction:column;align-items:stretch;width:152px;padding:8px;gap:6px;background:rgba(3,8,23,.78);border:1px solid rgba(36,91,159,.75);border-radius:16px;box-shadow:0 12px 34px rgba(0,0,0,.28);backdrop-filter:blur(14px)}
+.site-footer a{display:inline-flex;align-items:center;gap:9px;padding:12px 14px;border:1px solid transparent;border-radius:12px;color:var(--mu);text-decoration:none;transition:.15s}
 .site-footer a:hover,.site-footer a:focus-visible{border-color:var(--line);background:rgba(13,40,84,.8);color:var(--tx);outline:none;box-shadow:0 4px 16px rgba(35,139,255,.16)}
 .site-footer svg{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
-@media(max-width:859px){.site-footer{left:0;right:0;bottom:56px;width:auto;padding:0 8px;transform:none}.site-footer nav{width:100%;gap:3px;border-radius:13px}.site-footer a{flex:1;justify-content:center;padding:9px 4px;font-size:12px}.site-footer svg{width:18px;height:18px}}
+@media(max-width:859px){.site-footer{left:0;right:0;top:auto;bottom:56px;width:auto;padding:0 8px;transform:none}.site-footer nav{flex-direction:row;width:100%;gap:3px;border-radius:13px}.site-footer a{flex:1;justify-content:center;padding:9px 4px;font-size:12px}.site-footer svg{width:18px;height:18px}}
 </style></head>
 <body><div class="amb"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
 <div id="app">
