@@ -320,7 +320,7 @@ function draw(now) {
     if (state === STATES.PLAYING && !g.tapped) { txt('Drag to move the sheepdog. Sheep run away from you!', W / 2, H * 0.52, Math.min(18, W / 21), ink, 'bold', 0.75 + 0.25 * pulse); txt('Herd them into the pen. Tap to bark!', W / 2, H * 0.52 + 28, Math.min(16, W / 24), ink, 'bold', 0.7); }
   } else if (state === STATES.START) {
     ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(0, 0, W, safeTop + 190);
-    txt('SHEEPDOG SUNSET', W / 2, safeTop + 62, Math.min(50, W / 8), ink);
+    txt('SHEEPDOG SUNSET', W / 2, safeTop + 62, Math.min(42, W / 10), ink);
     txt('Herd the flock into the pen before the sun sets', W / 2, safeTop + 102, Math.min(16, W / 24), ink, 'normal', 0.9);
     txt('Watch out for wolves. Drag to move, tap to bark.', W / 2, safeTop + 126, Math.min(15, W / 25), ink, 'normal', 0.8);
     txt('TAP / CLICK TO START', W / 2, safeTop + 168, 22, '#fff', 'bold', 0.65 + 0.35 * pulse);

@@ -29,7 +29,7 @@ svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.8;stroke
 @keyframes drift{to{transform:translate(8vmax,6vmax) scale(1.2)}}
 @keyframes starDrift{to{transform:translate3d(3%,2%,0) rotate(2deg)}}
 #app{position:fixed;inset:0;z-index:1;width:100%;height:100%;min-height:100%;display:flex;flex-direction:column;padding:0;background:transparent}
-header{height:52px;flex:none;display:flex;align-items:center;justify-content:space-between;padding:0;background:transparent;backdrop-filter:none;border:0}
+header{height:76px;flex:none;display:flex;align-items:center;justify-content:space-between;padding:12px 14px 0;background:transparent;backdrop-filter:none;border:0}
 .logo{display:flex;align-items:center;position:relative;height:52px}.logo b{display:none}.logoMark{position:relative;width:330px;height:58px;display:block;flex:none;border:0;border-radius:0;background:transparent;box-shadow:none;overflow:hidden}
 .logoMark img{position:absolute;width:330px;height:110px;left:0;top:-26px;max-width:none;display:block;object-fit:fill;mix-blend-mode:screen}
 .hr{display:flex;align-items:center;gap:6px}
@@ -157,13 +157,13 @@ h3.t{font-size:19px;font-weight:800;padding:22px 18px 10px}
 input[type=range]{width:100%;accent-color:var(--ac);margin:12px 0 4px}
 #toast{position:fixed;left:50%;bottom:92px;transform:translate(-50%,20px);background:var(--tx);color:#0a0a0c;font-weight:800;padding:11px 20px;border-radius:99px;opacity:0;pointer-events:none;transition:.25s;z-index:30}#toast.on{opacity:1;transform:translate(-50%,0)}
 .nomo *,.nomo *::before,.nomo *::after{animation:none!important;transition:none!important}
-.site-footer{position:fixed;right:24px;top:50%;z-index:4;width:auto;padding:0;color:var(--mu);font-size:14px;transform:translateY(-50%)}
+.site-footer{position:absolute;left:50%;top:10px;z-index:4;width:auto;padding:0;color:var(--mu);font-size:14px;transform:translateX(-50%)}
 .site-footer p{display:none}
-.site-footer nav{display:flex;flex-direction:column;align-items:stretch;width:152px;padding:8px;gap:6px;background:rgba(3,8,23,.78);border:1px solid rgba(36,91,159,.75);border-radius:16px;box-shadow:0 12px 34px rgba(0,0,0,.28);backdrop-filter:blur(14px)}
+.site-footer nav{display:flex;flex-direction:row;align-items:center;width:auto;padding:4px 8px;gap:4px;background:rgba(3,8,23,.78);border:1px solid rgba(36,91,159,.75);border-radius:14px;box-shadow:0 12px 34px rgba(0,0,0,.28);backdrop-filter:blur(14px)}
 .site-footer a{display:inline-flex;align-items:center;gap:9px;padding:12px 14px;border:1px solid transparent;border-radius:12px;color:var(--mu);text-decoration:none;transition:.15s}
 .site-footer a:hover,.site-footer a:focus-visible{border-color:var(--line);background:rgba(13,40,84,.8);color:var(--tx);outline:none;box-shadow:0 4px 16px rgba(35,139,255,.16)}
 .site-footer svg{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
-@media(max-width:859px){.site-footer{left:0;right:0;top:auto;bottom:56px;width:auto;padding:0 8px;transform:none}.site-footer nav{flex-direction:row;width:100%;gap:3px;border-radius:13px}.site-footer a{flex:1;justify-content:center;padding:9px 4px;font-size:12px}.site-footer svg{width:18px;height:18px}}
+@media(max-width:859px){header{height:64px;padding:8px 8px 0}.site-footer{left:50%;right:auto;top:8px;width:auto;padding:0;transform:translateX(-50%)}.site-footer nav{width:max-content;gap:1px;border-radius:12px}.site-footer a{padding:7px 6px;font-size:11px;gap:4px}.site-footer svg{width:15px;height:15px}}
 @media(max-width:859px){.logo{height:48px}.logoMark{width:250px;height:46px}.logoMark img{width:250px;height:83px;left:0;top:-19px}}
 .logo{height:60px}.logoMark{width:330px;height:58px}
 .amb::before{opacity:.82;background-image:radial-gradient(circle at 20% 30%,rgba(24,212,255,.7) 0 2px,transparent 4px),radial-gradient(circle at 68% 18%,rgba(255,63,159,.6) 0 2px,transparent 4px),radial-gradient(circle at 84% 72%,rgba(35,139,255,.65) 0 2px,transparent 4px);background-size:190px 170px,260px 230px,220px 200px}
@@ -213,11 +213,11 @@ html,body{background:radial-gradient(ellipse at 50% 45%,#171a3d 0,#0b0d1b 42%,#0
 .ctl button{height:66px}
 .ctl .pri,.ctl .pri:hover,.ctl .pri:focus-visible,.ctl button[data-a="prev"],.ctl button[data-a="next"]{background:#ff3f9f!important;color:#fff!important;border-color:#ffd0ef!important;box-shadow:0 0 0 2px rgba(255,63,159,.35),0 0 24px rgba(255,63,159,.75),inset 0 0 14px rgba(255,255,255,.2)!important}
 .ctl button[data-a="prev"] svg,.ctl button[data-a="next"] svg,.ctl .pri svg{stroke:#fff!important}
-.site-footer{right:0;width:110px}
-.site-footer nav{width:100%;padding:5px;gap:3px;border-color:#386a62}
-.site-footer a{padding:9px 10px;font-size:12px}
-.view#disc,.view#saved,.view#home{padding-right:126px}
-@media(max-width:859px){.slide .mid{width:min(100%,420px)}.stage{width:100%;height:auto;aspect-ratio:.5625}.ctl{width:min(100%,420px)}.site-footer{width:auto}.view#disc,.view#saved,.view#home{padding-right:0}}
+.site-footer{left:50%;right:auto;top:10px;width:auto;transform:translateX(-50%)}
+.site-footer nav{width:auto;padding:4px 8px;gap:4px}
+.site-footer a{padding:12px 14px;font-size:14px}
+.view#disc,.view#saved,.view#home{padding-right:0}
+@media(max-width:859px){.slide .mid{width:min(100%,420px)}.stage{width:100%;height:auto;aspect-ratio:.5625}.ctl{width:min(100%,420px)}.logo{height:48px}.logoMark{width:250px;height:46px}.logoMark img{width:250px;height:83px;left:0;top:-19px}.site-footer{left:50%;right:auto;top:8px;width:auto;transform:translateX(-50%)}.site-footer nav{width:max-content;padding:4px;gap:1px}.site-footer a{padding:7px 6px;font-size:11px;gap:4px}}
 </style></head>
 <body><div class="amb"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><canvas class="fluid-canvas" id="fluidCanvas" aria-hidden="true"></canvas>
 <div id="app">
@@ -233,7 +233,7 @@ html,body{background:radial-gradient(ellipse at 50% 45%,#171a3d 0,#0b0d1b 42%,#0
  <section class="view" id="saved"><div class="scroll"><h3 class="t" style="padding-top:20px;font-size:26px">Saved</h3><div class="grid" id="sgrid"></div></div></section>
 </main></div>
 <noscript><div style="max-width:760px;margin:0 auto;padding:18px;color:#aec4e4;font-size:14px;line-height:1.6">Wonderground is a free browser arcade for quick, replayable games. Browse a growing collection of colorful one-tap challenges, puzzle games, racing ideas, action games, and casual score attacks designed to start quickly on phones, tablets, and computers. Every game is presented in a simple, focused interface so you can choose a title, play at your own pace, and come back for another attempt. Wonderground also offers optional Google sign-in for saving favorites and progress across devices. You can play without creating an account, and your local preferences can remain in your browser. We build Wonderground to make discovering small, enjoyable games feel easy and welcoming. JavaScript is required for the interactive game feed, but you can learn more about the site, privacy, terms, and support through the links below.</div></noscript>
-<footer class="site-footer"><p>Play freely. Know the site. Get support.</p><nav aria-label="Site information"><a href="/about" title="Learn about Wonderground"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3"/><path d="M5 20c1-4 3-6 7-6s6 2 7 6"/></svg><span>About</span></a><a href="/privacy" title="Read our privacy policy"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 5-3 8-7 10-4-2-7-5-7-10V6l7-3z"/><path d="M9 12l2 2 4-5"/></svg><span>Privacy</span></a><a href="/terms" title="Read our terms of use"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h12v16H6zM9 8h6M9 12h6M9 16h4"/></svg><span>Terms</span></a><a href="/contact" title="Contact Wonderground support"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4zM4 7l8 6 8-6"/></svg><span>Contact</span></a></nav></footer>
+<footer class="site-footer"><p>Play freely. Know the site. Get support.</p><nav aria-label="Site information"><a href="/about"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3"/><path d="M5 20c1-4 3-6 7-6s6 2 7 6"/></svg><span>About</span></a><a href="/privacy"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 5-3 8-7 10-4-2-7-5-7-10V6l7-3z"/><path d="M9 12l2 2 4-5"/></svg><span>Privacy</span></a><a href="/terms"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h12v16H6zM9 8h6M9 12h6M9 16h4"/></svg><span>Terms</span></a><a href="/contact"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4zM4 7l8 6 8-6"/></svg><span>Contact</span></a></nav></footer>
 </div>
 <div id="toast"></div>
 <script type="module">
@@ -368,8 +368,8 @@ $("#hp").innerHTML=I.play+"Play now";$("#hr2").innerHTML=I.rnd+"Surprise me";
 /* feed */
 const feed=$("#feed");let order=[],cur=-1;
 const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting&&e.intersectionRatio>.6)activate(+e.target.dataset.i)}),{root:feed,threshold:.6});
-const howTo=g=>{const n=g.name.toLowerCase();if(/rush|race|drift|slide/.test(n))return"Move quickly and react before the next obstacle.";if(/stack|sort|puzzle|grid|match|clash/.test(n))return"Plan each move, then tap to make your best run.";if(/shoot|bow|blitz|strike|cricket|soccer|arena/.test(n))return"Aim carefully, then tap at the right moment.";return"Tap to start, follow the cue, and chase a higher score."};
-const bestFor=g=>{try{return localStorage.getItem(`wg-best-${g.f}`)||"—"}catch(e){return"—"}};
+const howTo=g=>{const n=g.name.toLowerCase();if(/sheepdog|herd/.test(n))return"Guide the flock into safety before sunset.";if(/burger|pizza|suds|cook|stack/.test(n))return"Build the order carefully before time runs out.";if(/rush|race|drift|slide|ski/.test(n))return"Steer through hazards and keep your momentum.";if(/sort|puzzle|grid|match|chain|domino|gear/.test(n))return"Read the pattern, then make the smartest move.";if(/shoot|bow|blitz|strike|cricket|soccer|arena|siege/.test(n))return"Aim with care and hit the target at the right moment.";if(/garden|bonsai|frog|koi|pond|fish/.test(n))return"Time each move and keep the scene under control.";if(/swing|rope|grapple|climb|wire/.test(n))return"Hold your line, release at the right moment, and go farther.";return`Play ${g.name} and discover its challenge one move at a time.`};
+const bestFor=g=>{try{return localStorage.getItem(`wg-best-${g.f}`)||"Not played yet"}catch(e){return"Not played yet"}};
 function mk(i){const g=order[i],s=document.createElement("div");s.className="slide";s.dataset.i=i;
  const next=order[i+1]||G[(i+1)%G.length];
  s.innerHTML=`<div class="play-layout"><aside class="game-info"><span class="eyebrow">Now playing</span><h2>${g.name}</h2><p>${howTo(g)}</p><div class="score">Best run<b>${bestFor(g)}</b></div><div class="up-next"><i>${next.name[0]}</i><span>Up next<br>${next.name}</span></div></aside><div class="col"><div class="mid"><div class="head"><b>${g.name}</b></div><div class="prog"><u style="width:${(i%G.length+1)/G.length*100}%"></u></div><div class="stage"><div class="loader">${g.name[0]}</div></div></div>
