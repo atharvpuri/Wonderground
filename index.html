@@ -77,6 +77,23 @@ nav .go.on{background:var(--ac);color:#06101c;opacity:1;filter:none}nav .go svg{
 .ctl .fav.on{color:var(--ac)}.ctl .fav.on svg{fill:var(--ac)}
 @media(min-width:860px){.slide{--v:80px;--side:96px}.col{flex-direction:row;align-items:flex-end;gap:14px}.ctl{flex-direction:column;height:auto;width:80px;gap:8px}.ctl button{flex:none;height:62px}.ctl span{display:block}}
 @media(max-width:859px){.slide::before,.slide::after{display:none}}
+.amb{z-index:0;opacity:.34}
+.slide::before,.slide::after,.slide .col::before,.slide .col::after{display:none}
+.hero{position:relative;z-index:2}
+.hero>div:first-child{position:relative;z-index:3}
+.scene{position:relative;z-index:1}
+.play-layout{display:flex;align-items:center;justify-content:center;gap:clamp(18px,3vw,54px);width:min(100%,1080px);padding:0 18px}
+.game-info{width:205px;flex:none;color:var(--mu);padding:12px 0}
+.game-info .eyebrow{color:var(--ac);font-size:10px;font-weight:900;letter-spacing:.14em;text-transform:uppercase}
+.game-info h2{margin:8px 0 10px;color:var(--tx);font-size:24px;line-height:1.05}
+.game-info p{font-size:13px;line-height:1.45}
+.game-info .score{margin-top:20px;padding-top:12px;border-top:1px solid rgba(174,196,228,.18);font-size:12px}
+.game-info .score b{display:block;color:var(--tx);font-size:20px;margin-top:3px}
+.game-info .up-next{display:flex;align-items:center;gap:9px;margin-top:20px;color:var(--tx);font-size:12px;font-weight:800}
+.game-info .up-next i{display:grid;place-items:center;width:34px;height:34px;border-radius:9px;background:var(--s3);color:var(--tx);font-style:normal;font-weight:900}
+.play-layout>.col{flex:none}
+@media(min-width:860px){.play-layout>.col{flex-direction:row;align-items:flex-end;gap:14px}.play-layout .ctl{flex-direction:column;height:auto;width:80px;gap:8px}.play-layout .ctl button{flex:none;height:62px}}
+@media(max-width:859px){.play-layout{width:100%;padding:0;display:block}.game-info{display:none}}
 /* pages */
 .scroll{height:100%;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--s3) transparent;padding-bottom:30px}
 .pad{padding:0 18px}
@@ -335,9 +352,12 @@ $("#hp").innerHTML=I.play+"Play now";$("#hr2").innerHTML=I.rnd+"Surprise me";
 /* feed */
 const feed=$("#feed");let order=[],cur=-1;
 const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting&&e.intersectionRatio>.6)activate(+e.target.dataset.i)}),{root:feed,threshold:.6});
+const howTo=g=>{const n=g.name.toLowerCase();if(/rush|race|drift|slide/.test(n))return"Move quickly and react before the next obstacle.";if(/stack|sort|puzzle|grid|match|clash/.test(n))return"Plan each move, then tap to make your best run.";if(/shoot|bow|blitz|strike|cricket|soccer|arena/.test(n))return"Aim carefully, then tap at the right moment.";return"Tap to start, follow the cue, and chase a higher score."};
+const bestFor=g=>{try{return localStorage.getItem(`wg-best-${g.f}`)||"—"}catch(e){return"—"}};
 function mk(i){const g=order[i],s=document.createElement("div");s.className="slide";s.dataset.i=i;
- s.innerHTML=`<div class="col"><div class="mid"><div class="head"><b>${g.name}</b></div><div class="prog"><u style="width:${(i%G.length+1)/G.length*100}%"></u></div><div class="stage"><div class="loader">${g.name[0]}</div></div></div>
- <div class="ctl"><button data-a="rnd" title="Random">${I.rnd}<span>Random</span></button><button class="fav ${favs.has(g.f)?"on":""}" data-a="fav" title="Save">${I.heart}<span>Save</span></button><button data-a="full" title="Fullscreen">${I.full}<span>Full</span></button><button class="pri" data-a="prev" title="Previous">${I.up}<span>Prev</span></button><button class="pri" data-a="next" title="Next">${I.dn}<span>Next</span></button></div></div>`;
+ const next=order[i+1]||G[(i+1)%G.length];
+ s.innerHTML=`<div class="play-layout"><aside class="game-info"><span class="eyebrow">Now playing</span><h2>${g.name}</h2><p>${howTo(g)}</p><div class="score">Best run<b>${bestFor(g)}</b></div><div class="up-next"><i>${next.name[0]}</i><span>Up next<br>${next.name}</span></div></aside><div class="col"><div class="mid"><div class="head"><b>${g.name}</b></div><div class="prog"><u style="width:${(i%G.length+1)/G.length*100}%"></u></div><div class="stage"><div class="loader">${g.name[0]}</div></div></div>
+ <div class="ctl"><button data-a="rnd" title="Random">${I.rnd}<span>Random</span></button><button class="fav ${favs.has(g.f)?"on":""}" data-a="fav" title="Save">${I.heart}<span>Save</span></button><button data-a="full" title="Fullscreen">${I.full}<span>Full</span></button><button class="pri" data-a="prev" title="Previous">${I.up}<span>Prev</span></button><button class="pri" data-a="next" title="Next">${I.dn}<span>Next</span></button></div></div></div>`;
  feed.appendChild(s);io.observe(s)}
 function batch(){if(!G.length)return;const b=shuffle([...G]);if(order.length&&b[0]===order[order.length-1]&&b.length>1)b.push(b.shift());const st=order.length;order.push(...b);b.forEach((_,k)=>mk(st+k))}
 function build(){feed.innerHTML="";order=[];cur=-1;if(!G.length){feed.innerHTML='<div class="empty">No games found. Add your games to the games folder and list them in games.js.</div>';return}batch()}
