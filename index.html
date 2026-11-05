@@ -220,15 +220,18 @@ html,body{background:radial-gradient(ellipse at 50% 45%,#171a3d 0,#0b0d1b 42%,#0
 @media(max-width:520px){header{height:112px;padding:7px 8px 0;align-items:flex-start}.logo{height:42px;min-width:0}.logoMark{width:min(48vw,190px);height:40px}.logoMark img{width:min(48vw,190px);height:auto;top:-15px}.hr{gap:2px}.chip{display:none}.auth{height:32px;padding:0 8px;font-size:11px}.ib{width:34px;height:34px}.play-layout{padding:0 8px}.stage{border-radius:16px}.ctl{gap:4px}.ctl button{border-radius:12px}.site-footer{top:64px}.site-footer a{padding:6px 5px;font-size:10px}}
 @media (hover:none) and (pointer:coarse){.card{transform:none!important}.card .pl{display:none}}
 @media(max-width:859px){
-  #play .slide{padding:8px 0}
-  #play .play-layout{display:flex;align-items:center;width:100%;padding:0 8px}
+  .body{display:flex;flex-direction:column-reverse;min-height:0}
+  #nav{height:76px;flex:none;padding:0 8px}
+  #play .slide{height:100%;min-height:0;padding:8px 0;overflow:hidden}
+  #play .play-layout{display:flex;align-items:center;height:100%;width:100%;padding:0 8px}
   #play .play-layout>.col{width:100%;align-items:center;gap:8px}
   #play .mid{width:min(100%,420px)}
-  #play .stage{width:min(100%,calc((100dvh - 250px) * .5625));height:min(calc(100dvh - 250px),640px);aspect-ratio:9/16;flex:none}
+  #play .stage{width:min(100%,calc((100cqh - 108px) * .5625));height:min(calc(100cqh - 108px),640px);aspect-ratio:9/16;flex:none}
   #play .ctl{width:min(100%,420px);height:56px;flex:none}
 }
 @media(max-width:520px){
-  #play .stage{width:min(100%,calc((100dvh - 230px) * .5625));height:min(calc(100dvh - 230px),640px)}
+  #nav{height:76px}
+  #play .stage{width:min(100%,calc((100cqh - 108px) * .5625));height:min(calc(100cqh - 108px),640px)}
 }
 </style></head>
 <body><div class="amb"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
