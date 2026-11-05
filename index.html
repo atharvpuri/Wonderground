@@ -70,7 +70,9 @@ nav .go.on{background:var(--ac);color:#06101c;opacity:1;filter:none}nav .go svg{
 .ctl{display:flex;gap:6px;height:56px}
 .ctl button{flex:1;height:52px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;border-radius:16px;background:#1b2a3d;color:#f4f1ea;font-size:10px;font-weight:700;opacity:1;filter:none;transition:.15s;box-shadow:0 6px 18px rgba(0,0,0,.2)}
 .ctl span{display:none}.ctl button:hover{background:var(--s3);color:var(--tx)}.ctl button:active{transform:scale(.93)}
-.ctl .pri{background:var(--ac);color:#06101c;opacity:1;filter:none}
+.ctl .pri,.ctl .pri:hover,.ctl .pri:focus-visible{background:#238bff!important;color:#06101c!important;opacity:1!important;filter:none!important;border:1px solid #6ec1ff;box-shadow:0 0 0 1px rgba(110,193,255,.35),0 8px 24px rgba(35,139,255,.45)}
+.ctl .pri svg{stroke:#06101c!important}
+.ctl .pri:active{background:#8bd5ff!important;color:#06101c!important}
 .ctl .fav.on{color:var(--ac)}.ctl .fav.on svg{fill:var(--ac)}
 @media(min-width:860px){.slide{--v:80px;--side:96px}.col{flex-direction:row;align-items:flex-end;gap:14px}.ctl{flex-direction:column;height:auto;width:80px;gap:8px}.ctl button{flex:none;height:62px}.ctl span{display:block}}
 @media(max-width:859px){.slide::before,.slide::after{display:none}}
