@@ -275,8 +275,8 @@ authButton?.addEventListener("click", async () => {
 <script>
 const FOLDER="games/",CATS=window.CATS||{};
 const G=(window.GAMES||[]).map(f=>({f,name:f.replace(/\.html?$/i,"").replace(/[-_]+/g," ").replace(/\b\w/g,c=>c.toUpperCase()),c:CATS[f]||""}));
-if(G.length)$("#dailyGame").textContent=G[(new Date().getDate()+new Date().getMonth())%G.length].name;
 const $=s=>document.querySelector(s),$$=s=>document.querySelectorAll(s);
+if(G.length)$("#dailyGame").textContent=G[(new Date().getDate()+new Date().getMonth())%G.length].name;
 const P=d=>`<svg viewBox="0 0 24 24"><path d="${d}"/></svg>`;
 const I={heart:P("M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z"),up:P("M6 14l6-6 6 6"),dn:P("M6 10l6 6 6-6"),
  rnd:P("M4 7h3c5 0 5 10 10 10h3M4 17h3c1.500 0 2.600-.8 3.500-2M14 8c.9-.7 1.800-1 3-1h3M17 4l3 3-3 3M17 14l3 3-3 3"),
