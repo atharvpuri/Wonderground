@@ -368,7 +368,7 @@ const shuffle=a=>{for(let i=a.length-1;i>0;i--){const j=Math.random()*(i+1)|0;[a
 const SND="<script>(()=>{const B=window.BaseAudioContext;if(!B)return;window.__v=1;const d=Object.getOwnPropertyDescriptor(B.prototype,'destination');window.__g=[];Object.defineProperty(B.prototype,'destination',{configurable:true,get(){if(!this.__m){this.__m=this.createGain();this.__m.connect(d.get.call(this));this.__m.gain.value=window.__v;window.__g.push(this.__m)}return this.__m}});addEventListener('message',e=>{if(e.data&&e.data.vol!=null){window.__v=e.data.vol;window.__g.forEach(g=>g.gain.value=e.data.vol)}})})();<\/script>";
 const inject=t=>/<head[^>]*>/i.test(t)?t.replace(/<head[^>]*>/i,m=>m+SND):/<html[^>]*>/i.test(t)?t.replace(/<html[^>]*>/i,m=>m+SND):SND+t;
 const cache=new Map();
-function html(f){if(cache.has(f))return cache.get(f);const p=fetch(FOLDER+encodeURIComponent(f)).then(r=>{if(!r.ok)throw 0;return r.text()}).then(inject);cache.set(f,p);p.catch(()=>cache.delete(f));if(cache.size>12)cache.delete(cache.keys().next().value);return p}
+function html(f){if(cache.has(f))return cache.get(f);const p=fetch(FOLDER+encodeURIComponent(f)).then(r=>{if(!r.ok)throw 0;return r.text()}).then(inject);cache.set(f,p);p.catch(()=>cache.delete(f));if(cache.size>4)cache.delete(cache.keys().next().value);return p}
 function warm(f){html(f).catch(()=>{if(!document.querySelector(`link[data-p="${CSS.escape(f)}"]`)){const l=document.createElement("link");l.rel="prefetch";l.href=FOLDER+encodeURIComponent(f);l.dataset.p=f;document.head.appendChild(l)}})}
 const volNow=()=>S.muted?0:S.vol/100;
 const sendVol=fr=>{try{fr.contentWindow.postMessage({vol:volNow()},"*")}catch(e){}};
@@ -391,7 +391,7 @@ function mk(i){const g=order[i],s=document.createElement("div");s.className="sli
  <div class="ctl"><button data-a="rnd" title="Random">${I.rnd}<span>Random</span></button><button class="fav ${favs.has(g.f)?"on":""}" data-a="fav" title="Save">${I.heart}<span>Save</span></button><button data-a="full" title="Fullscreen">${I.full}<span>Full</span></button><button class="pri" data-a="prev" title="Previous">${I.up}<span>Prev</span></button><button class="pri" data-a="next" title="Next">${I.dn}<span>Next</span></button></div></div></div>`;
  feed.appendChild(s);io.observe(s)}
 function batch(){if(!G.length)return;const b=shuffle([...G]);if(order.length&&b[0]===order[order.length-1]&&b.length>1)b.push(b.shift());const st=order.length;order.push(...b);b.forEach((_,k)=>mk(st+k))}
-function build(){feed.innerHTML="";order=[];cur=-1;if(!G.length){feed.innerHTML='<div class="empty">No games found. Add your games to the games folder and list them in games.js.</div>';return}batch();order.slice(0,6).forEach(g=>warm(g.f))}
+function build(){feed.innerHTML="";order=[];cur=-1;if(!G.length){feed.innerHTML='<div class="empty">No games found. Add your games to the games folder and list them in games.js.</div>';return}batch()}
 async function mount(i,st){const g=order[i],fr=document.createElement("iframe");fr.allow="autoplay;fullscreen";
  fr.onload=()=>{const l=st.querySelector(".loader");if(l)l.classList.add("off");sendVol(fr)};
  fr.onerror=()=>{const l=st.querySelector(".loader");if(l){l.textContent="Game could not load. Try Next.";l.classList.add("error")}};
@@ -402,7 +402,7 @@ function activate(i){if(i===cur||!feed.children[i]||!feed.children[i].dataset||!
  cur=i;const g=order[i];mount(i,feed.children[i].querySelector(".stage"));
  seen=[g.f,...seen.filter(x=>x!==g.f)].slice(0,40);$("#pc").textContent=++plays;window.plays=plays;try{localStorage.setItem("wg-plays",String(plays))}catch(e){};window.revealAuthNote?.();store();
  if(i>order.length-4)batch();
- for(let k=1;k<=3;k++)if(order[i+k])warm(order[i+k].f);else if(G.length)warm(G[k%G.length].f)}
+ for(let k=1;k<=2;k++)if(order[i+k])warm(order[i+k].f)}
 const go=i=>{const s=feed.children[Math.max(0,Math.min(order.length-1,i))];if(s)s.scrollIntoView({behavior:S.motion?"smooth":"auto"})};
 function jump(i){const s=feed.children[i];if(!s)return;feed.scrollTop=s.offsetTop;activate(i)}
 function rndGame(){if(!G.length)return;show("play");let i;do{i=Math.random()*order.length|0}while(i===cur&&order.length>1);jump(i)}
