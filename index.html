@@ -121,6 +121,12 @@ h3.t{font-size:19px;font-weight:800;padding:22px 18px 10px}
 input[type=range]{width:100%;accent-color:var(--ac);margin:12px 0 4px}
 #toast{position:fixed;left:50%;bottom:92px;transform:translate(-50%,20px);background:var(--tx);color:#0a0a0c;font-weight:800;padding:11px 20px;border-radius:99px;opacity:0;pointer-events:none;transition:.25s;z-index:30}#toast.on{opacity:1;transform:translate(-50%,0)}
 .nomo *,.nomo *::before,.nomo *::after{animation:none!important;transition:none!important}
+.site-footer{flex:none;padding:10px 18px 14px;text-align:center;color:var(--mu);font-size:12px}
+.site-footer p{margin:0 0 8px;color:var(--mu);font-size:11px;letter-spacing:.04em}
+.site-footer nav{display:flex;justify-content:center;flex-wrap:wrap;gap:8px}
+.site-footer a{display:inline-flex;align-items:center;gap:6px;padding:7px 10px;border:1px solid transparent;border-radius:9px;color:var(--mu);text-decoration:none;transition:.15s}
+.site-footer a:hover,.site-footer a:focus-visible{border-color:var(--line);background:rgba(13,40,84,.8);color:var(--tx);outline:none;box-shadow:0 4px 16px rgba(35,139,255,.16)}
+.site-footer svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 </style></head>
 <body><div class="amb"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
 <div id="app">
@@ -136,7 +142,7 @@ input[type=range]{width:100%;accent-color:var(--ac);margin:12px 0 4px}
  <section class="view" id="saved"><div class="scroll"><h3 class="t" style="padding-top:20px;font-size:26px">Saved</h3><div class="grid" id="sgrid"></div></div></section>
 </main></div>
 <noscript><div style="max-width:760px;margin:0 auto;padding:18px;color:#aec4e4;font-size:14px;line-height:1.6">Wonderground is a free browser arcade for quick, replayable games. Browse a growing collection of colorful one-tap challenges, puzzle games, racing ideas, action games, and casual score attacks designed to start quickly on phones, tablets, and computers. Every game is presented in a simple, focused interface so you can choose a title, play at your own pace, and come back for another attempt. Wonderground also offers optional Google sign-in for saving favorites and progress across devices. You can play without creating an account, and your local preferences can remain in your browser. We build Wonderground to make discovering small, enjoyable games feel easy and welcoming. JavaScript is required for the interactive game feed, but you can learn more about the site, privacy, terms, and support through the links below.</div></noscript>
-<footer style="flex:none;padding:8px 18px 12px;text-align:center;color:#aec4e4;font-size:12px"><a href="/about" style="color:#aec4e4;margin:0 7px">About</a><a href="/privacy" style="color:#aec4e4;margin:0 7px">Privacy</a><a href="/terms" style="color:#aec4e4;margin:0 7px">Terms</a><a href="/contact" style="color:#aec4e4;margin:0 7px">Contact</a></footer>
+<footer class="site-footer"><p>Play freely. Know the site. Get support.</p><nav aria-label="Site information"><a href="/about" title="Learn about Wonderground"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3"/><path d="M5 20c1-4 3-6 7-6s6 2 7 6"/></svg><span>About</span></a><a href="/privacy" title="Read our privacy policy"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 5-3 8-7 10-4-2-7-5-7-10V6l7-3z"/><path d="M9 12l2 2 4-5"/></svg><span>Privacy</span></a><a href="/terms" title="Read our terms of use"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h12v16H6zM9 8h6M9 12h6M9 16h4"/></svg><span>Terms</span></a><a href="/contact" title="Contact Wonderground support"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4zM4 7l8 6 8-6"/></svg><span>Contact</span></a></nav></footer>
 </div>
 <div id="toast"></div>
 <script type="module">
