@@ -292,10 +292,10 @@ feed.addEventListener("click",e=>{const b=e.target.closest("[data-a]");if(!b)ret
  else if(a==="full"){const st=b.closest(".slide").querySelector(".stage");(st.requestFullscreen||st.webkitRequestFullscreen||(()=>{})).call(st)}});
 addEventListener("keydown",e=>{if(!$("#play").classList.contains("on"))return;if(e.key==="ArrowDown"||e.key==="j")go(cur+1);if(e.key==="ArrowUp"||e.key==="k")go(cur-1)});
 /* cards */
-const pvQ=[];let pvB=0;
+const pvQ=[],pvDocs=new Map();let pvB=0;
 function pump(){while(pvB<4&&pvQ.length){const c=pvQ.shift();if(!c.isConnected||!c._v||c.querySelector("iframe"))continue;pvB++;mountPv(c)}}
-function mountPv(c){if(!c.isConnected||!c._v||c.querySelector("iframe")){pvB=Math.max(0,pvB-1);return}const f=document.createElement("iframe");f.tabIndex=-1;f.loading="eager";f.src=FOLDER+encodeURIComponent(c.dataset.f);f.style.transform=`scale(${c.clientWidth/360})`;f.onload=()=>{f.classList.add("loaded");pvB=Math.max(0,pvB-1);pump()};c.insertBefore(f,c.children[1])}
-const pio=new IntersectionObserver(es=>es.forEach(e=>{const c=e.target;c._v=e.isIntersecting;if(e.isIntersecting){pvQ.push(c);pump()}else{const f=c.querySelector("iframe");if(f)f.remove()}}),{rootMargin:"500px"});
+async function mountPv(c){if(!c.isConnected||!c._v||c.querySelector("iframe")){pvB=Math.max(0,pvB-1);return}const f=document.createElement("iframe");f.tabIndex=-1;f.loading="eager";f.style.transform=`scale(${c.clientWidth/360})`;f.onload=()=>{f.classList.add("loaded");pvB=Math.max(0,pvB-1);pump()};c.insertBefore(f,c.children[1]);try{let doc=pvDocs.get(c.dataset.f);if(!doc){doc=html(c.dataset.f);pvDocs.set(c.dataset.f,doc)}f.srcdoc=await doc}catch(e){pvDocs.delete(c.dataset.f);f.src=FOLDER+encodeURIComponent(c.dataset.f)}}
+const pio=new IntersectionObserver(es=>es.forEach(e=>{const c=e.target;c._v=e.isIntersecting;if(e.isIntersecting){pvQ.push(c);pump()}}),{rootMargin:"800px"});
 const card=(g,i)=>`<div class="card" data-f="${g.f}" style="--d:${Math.min(i,12)}"><div class="mono">${g.name[0]}</div><div class="shade"></div><div class="pl"><i>${I.play}</i></div><div class="n">${g.name}</div><button class="f ${favs.has(g.f)?"on":""}" data-s="${g.f}">${I.heart}</button></div>`;
 function paint(el,l,msg){el.innerHTML=l.length?l.map(card).join(""):`<div class="empty">${msg}</div>`;el.querySelectorAll(".card").forEach(c=>pio.observe(c))}
 const byF=f=>G.find(g=>g.f===f);
