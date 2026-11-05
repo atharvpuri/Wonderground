@@ -1,0 +1,17 @@
+{
+  "name": "Wonderground",
+  "short_name": "Wonderground",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#07090d",
+  "theme_color": "#07090d",
+  "description": "Quick, colorful browser games for short replayable sessions.",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
