@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://wonderground.vercel.app/sitemap.xml
+Sitemap: https://wondergroundgames.vercel.app/sitemap.xml
