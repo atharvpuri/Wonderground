@@ -133,7 +133,7 @@ h3.t{font-size:19px;font-weight:800;padding:22px 18px 10px}
 .card{position:relative;aspect-ratio:3/4;border-radius:18px;border:1px solid #2d5da8;overflow:hidden;background:linear-gradient(145deg,#123b82,#261747 55%,#071225);cursor:pointer;animation:rise .5s both;animation-delay:calc(var(--d,0)*40ms);transform:perspective(700px) rotateX(var(--rx,0deg)) rotateY(var(--ry,0deg));transition:transform .2s,border-color .2s,box-shadow .2s}
 @keyframes rise{from{opacity:0;transform:translateY(18px) scale(.97)}}
 .card:hover{border-color:var(--ac);box-shadow:0 18px 40px -16px color-mix(in srgb,var(--ac) 60%,transparent)}
-.card .mono{position:absolute;inset:0;display:grid;place-items:center;font-size:56px;font-weight:900;color:var(--tx);background:linear-gradient(145deg,#17263b,#243a4b);animation:thumbGlow 5s ease-in-out infinite alternate}
+.card .mono{position:absolute;inset:0;background:linear-gradient(145deg,#17263b,#243a4b);animation:thumbGlow 5s ease-in-out infinite alternate}
 @keyframes thumbGlow{to{filter:hue-rotate(18deg) saturate(1.35)}}
 .card iframe{position:absolute;left:0;top:0;width:360px;height:480px;border:0;transform-origin:0 0;pointer-events:none;background:#071225;opacity:0;transition:opacity .25s}.card iframe.loaded{opacity:1}
 .card .shade{position:absolute;inset:auto 0 0;height:60%;background:linear-gradient(transparent,rgba(4,9,24,.92));pointer-events:none}
@@ -372,13 +372,14 @@ const howTo=g=>{const n=g.name.toLowerCase();if(/sheepdog|herd/.test(n))return"G
 const bestFor=g=>{try{return localStorage.getItem(`wg-best-${g.f}`)||"Not played yet"}catch(e){return"Not played yet"}};
 function mk(i){const g=order[i],s=document.createElement("div");s.className="slide";s.dataset.i=i;
  const next=order[i+1]||G[(i+1)%G.length];
- s.innerHTML=`<div class="play-layout"><aside class="game-info"><span class="eyebrow">Now playing</span><h2>${g.name}</h2><p>${howTo(g)}</p><div class="score">Best run<b>${bestFor(g)}</b></div><div class="up-next"><i>${next.name[0]}</i><span>Up next<br>${next.name}</span></div></aside><div class="col"><div class="mid"><div class="head"><b>${g.name}</b></div><div class="prog"><u style="width:${(i%G.length+1)/G.length*100}%"></u></div><div class="stage"><div class="loader">${g.name[0]}</div></div></div>
+ s.innerHTML=`<div class="play-layout"><aside class="game-info"><span class="eyebrow">Now playing</span><h2>${g.name}</h2><p>${howTo(g)}</p><div class="score">Best run<b>${bestFor(g)}</b></div><div class="up-next"><i>${I.play}</i><span>Up next<br>${next.name}</span></div></aside><div class="col"><div class="mid"><div class="head"><b>${g.name}</b></div><div class="prog"><u style="width:${(i%G.length+1)/G.length*100}%"></u></div><div class="stage"><div class="loader" aria-live="polite"></div></div></div>
  <div class="ctl"><button data-a="rnd" title="Random">${I.rnd}<span>Random</span></button><button class="fav ${favs.has(g.f)?"on":""}" data-a="fav" title="Save">${I.heart}<span>Save</span></button><button data-a="full" title="Fullscreen">${I.full}<span>Full</span></button><button class="pri" data-a="prev" title="Previous">${I.up}<span>Prev</span></button><button class="pri" data-a="next" title="Next">${I.dn}<span>Next</span></button></div></div></div>`;
  feed.appendChild(s);io.observe(s)}
 function batch(){if(!G.length)return;const b=shuffle([...G]);if(order.length&&b[0]===order[order.length-1]&&b.length>1)b.push(b.shift());const st=order.length;order.push(...b);b.forEach((_,k)=>mk(st+k))}
-function build(){feed.innerHTML="";order=[];cur=-1;if(!G.length){feed.innerHTML='<div class="empty">No games found. Add your games to the games folder and list them in games.js.</div>';return}batch()}
+function build(){feed.innerHTML="";order=[];cur=-1;if(!G.length){feed.innerHTML='<div class="empty">No games found. Add your games to the games folder and list them in games.js.</div>';return}batch();order.slice(0,6).forEach(g=>warm(g.f))}
 async function mount(i,st){const g=order[i],fr=document.createElement("iframe");fr.allow="autoplay;fullscreen";
  fr.onload=()=>{const l=st.querySelector(".loader");if(l)l.classList.add("off");sendVol(fr)};
+ fr.onerror=()=>{const l=st.querySelector(".loader");if(l){l.textContent="Game could not load. Try Next.";l.classList.add("error")}};
  try{fr.srcdoc=await html(g.f)}catch(e){fr.src=FOLDER+encodeURIComponent(g.f)}
  if(cur===i)st.appendChild(fr)}
 function activate(i){if(i===cur||!feed.children[i]||!feed.children[i].dataset||!order[i])return;
@@ -386,7 +387,7 @@ function activate(i){if(i===cur||!feed.children[i]||!feed.children[i].dataset||!
  cur=i;const g=order[i];mount(i,feed.children[i].querySelector(".stage"));
  seen=[g.f,...seen.filter(x=>x!==g.f)].slice(0,40);$("#pc").textContent=++plays;window.plays=plays;try{localStorage.setItem("wg-plays",String(plays))}catch(e){};window.revealAuthNote?.();store();
  if(i>order.length-4)batch();
- if(S.quick)for(let k=1;k<=2;k++)if(order[i+k])warm(order[i+k].f);else if(G.length)warm(G[k%G.length].f)}
+ for(let k=1;k<=3;k++)if(order[i+k])warm(order[i+k].f);else if(G.length)warm(G[k%G.length].f)}
 const go=i=>{const s=feed.children[Math.max(0,Math.min(order.length-1,i))];if(s)s.scrollIntoView({behavior:S.motion?"smooth":"auto"})};
 function jump(i){const s=feed.children[i];if(!s)return;feed.scrollTop=s.offsetTop;activate(i)}
 function rndGame(){if(!G.length)return;show("play");let i;do{i=Math.random()*order.length|0}while(i===cur&&order.length>1);jump(i)}
@@ -402,7 +403,7 @@ const pvQ=[],pvDocs=new Map();let pvB=0;
 function pump(){while(pvB<4&&pvQ.length){const c=pvQ.shift();if(!c.isConnected||!c._v||c.querySelector("iframe"))continue;pvB++;mountPv(c)}}
 async function mountPv(c){if(!c.isConnected||!c._v||c.querySelector("iframe")){pvB=Math.max(0,pvB-1);return}const f=document.createElement("iframe");f.tabIndex=-1;f.loading="eager";f.style.transform=`scale(${c.clientWidth/360})`;f.onload=()=>{f.classList.add("loaded");pvB=Math.max(0,pvB-1);pump()};c.insertBefore(f,c.children[1]);try{let doc=pvDocs.get(c.dataset.f);if(!doc){doc=html(c.dataset.f);pvDocs.set(c.dataset.f,doc)}f.srcdoc=await doc}catch(e){pvDocs.delete(c.dataset.f);f.src=FOLDER+encodeURIComponent(c.dataset.f)}}
 const pio=new IntersectionObserver(es=>es.forEach(e=>{const c=e.target;c._v=e.isIntersecting;if(e.isIntersecting){pvQ.push(c);pump()}}),{rootMargin:"800px"});
-const card=(g,i)=>`<div class="card" data-f="${g.f}" style="--d:${Math.min(i,12)}"><div class="mono">${g.name[0]}</div><div class="shade"></div><div class="pl"><i>${I.play}</i></div><div class="n">${g.name}</div><button class="f ${favs.has(g.f)?"on":""}" data-s="${g.f}">${I.heart}</button></div>`;
+const card=(g,i)=>`<div class="card" data-f="${g.f}" style="--d:${Math.min(i,12)}"><div class="mono" aria-label="${g.name} thumbnail"></div><div class="shade"></div><div class="pl"><i>${I.play}</i></div><div class="n">${g.name}</div><button class="f ${favs.has(g.f)?"on":""}" data-s="${g.f}">${I.heart}</button></div>`;
 function paint(el,l,msg){el.innerHTML=l.length?l.map(card).join(""):`<div class="empty">${msg}</div>`;el.querySelectorAll(".card").forEach(c=>pio.observe(c))}
 const byF=f=>G.find(g=>g.f===f);
 function drawHome(){const rec=seen.map(byF).filter(Boolean).slice(0,10),sv=G.filter(g=>favs.has(g.f)).slice(0,10),fresh=shuffle([...G]).slice(0,12);
