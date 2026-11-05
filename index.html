@@ -130,6 +130,31 @@ input[type=range]{width:100%;accent-color:var(--ac);margin:12px 0 4px}
 .site-footer a:hover,.site-footer a:focus-visible{border-color:var(--line);background:rgba(13,40,84,.8);color:var(--tx);outline:none;box-shadow:0 4px 16px rgba(35,139,255,.16)}
 .site-footer svg{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 @media(max-width:859px){.site-footer{left:0;right:0;top:auto;bottom:56px;width:auto;padding:0 8px;transform:none}.site-footer nav{flex-direction:row;width:100%;gap:3px;border-radius:13px}.site-footer a{flex:1;justify-content:center;padding:9px 4px;font-size:12px}.site-footer svg{width:18px;height:18px}}
+.logo{gap:10px;font-size:17px;letter-spacing:.2em}
+.logoMark{width:34px;height:34px;border-radius:9px;font-size:17px;box-shadow:0 0 0 2px rgba(35,139,255,.28),0 6px 22px rgba(35,139,255,.55)}
+.logo::after{left:44px;bottom:-7px;height:2px;box-shadow:0 0 12px var(--ac)}
+.amb::before{opacity:.82;background-image:radial-gradient(circle at 20% 30%,rgba(24,212,255,.7) 0 2px,transparent 4px),radial-gradient(circle at 68% 18%,rgba(255,63,159,.6) 0 2px,transparent 4px),radial-gradient(circle at 84% 72%,rgba(35,139,255,.65) 0 2px,transparent 4px);background-size:190px 170px,260px 230px,220px 200px}
+.amb i{opacity:.42;filter:blur(72px)}
+.amb i:nth-child(1){width:62vmax;height:62vmax}
+.amb i:nth-child(2){width:58vmax;height:58vmax}
+.amb i:nth-child(3){opacity:.36}
+.site-footer{right:18px;width:172px}
+.site-footer nav{width:100%}
+.view#disc,.view#saved{padding-right:196px}
+.view#home{padding-right:196px}
+.ctl button[data-a="prev"],.ctl button[data-a="next"],
+.ctl .pri,.ctl .pri:hover,.ctl .pri:focus,.ctl .pri:focus-visible{
+ background:#238bff!important;
+ color:#ffffff!important;
+ opacity:1!important;
+ filter:none!important;
+ border:2px solid #9edbff!important;
+ box-shadow:0 0 0 2px rgba(35,139,255,.3),0 0 22px rgba(35,139,255,.8),inset 0 0 16px rgba(255,255,255,.18)!important;
+ text-shadow:0 1px 3px rgba(0,0,0,.65);
+}
+.ctl button[data-a="prev"] svg,.ctl button[data-a="next"] svg,.ctl .pri svg{stroke:#ffffff!important}
+.ctl button[data-a="prev"]:active,.ctl button[data-a="next"]:active{background:#ff3f9f!important;border-color:#ffd0ef!important}
+@media(max-width:859px){.view#disc,.view#saved,.view#home{padding-right:0}.site-footer{right:0;width:auto}}
 </style></head>
 <body><div class="amb"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
 <div id="app">
